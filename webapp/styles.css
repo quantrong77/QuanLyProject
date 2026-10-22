@@ -452,9 +452,39 @@ body.loading #topProgress { opacity: 1; }
 .boot-error { display: grid; gap: 10px; justify-items: center; max-width: 42ch; color: var(--ink); }
 .boot-error p { margin: 0; color: var(--muted); }
 
+/* ---------- Hướng dẫn & giới thiệu ---------- */
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.help-btn { width: 38px; height: 38px; border-radius: 50%; border: 0; cursor: pointer; background: rgba(255, 255, 255, .1); color: #fff; font-weight: 700; font-size: 1.05rem; }
+.help-btn:hover { background: rgba(255, 255, 255, .18); }
+.guide .subtabs { margin-bottom: 4px; }
+.guide details { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.guide details + details { margin-top: 8px; }
+.guide summary { cursor: pointer; padding: 12px 14px; font-weight: 600; list-style: none; display: flex; justify-content: space-between; align-items: center; }
+.guide summary::-webkit-details-marker { display: none; }
+.guide summary::after { content: "+"; color: var(--muted); font-weight: 400; font-size: 1.2rem; }
+.guide details[open] summary::after { content: "–"; }
+.guide details[open] summary { color: var(--brand-2); border-bottom: 1px solid var(--line); }
+.g-body { padding: 10px 14px 14px; font-size: .92rem; line-height: 1.55; }
+.g-body ol, .g-body ul, .guide [data-gpanel=about] ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.g-body .tip { margin: 10px 0 0; padding: 8px 10px; background: var(--surface-2); border-radius: 8px; font-size: .86rem; color: var(--muted); }
+.g-body dl { margin: 0; display: grid; gap: 4px; }
+.g-body dt { font-weight: 600; margin-top: 6px; }
+.g-body dd { margin: 0; color: var(--muted); }
+.guide [data-gpanel=about] p { margin: 0 0 10px; line-height: 1.55; }
+.about-meta { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 14px 0 0; padding: 12px 14px; background: var(--surface-2); border-radius: 10px; font-size: .88rem; }
+.about-meta dt { color: var(--muted); }
+.about-meta dd { margin: 0; font-weight: 500; }
+.linkish { background: none; border: 0; padding: 0; color: var(--brand-2); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+#toast .t-act { display: inline-block; margin: 6px 0 0; background: none; border: 1px solid #ffffff55; color: #fff; border-radius: 8px; padding: 4px 10px; font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer; }
+#toast .t-act:hover { background: #ffffff1a; }
+#toast .t span { display: grid; justify-items: start; }
+.login-privacy { font-size: .8rem; }
+.login-help { display: grid; justify-items: start; gap: 4px; font-size: .84rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+.reg-alt { margin: 0; text-align: center; font-size: .85rem; color: var(--muted); }
+
 /* ---------- Màn hình đăng nhập ---------- */
 .login { display: grid; grid-template-columns: 1.05fr 1fr; max-width: 980px; margin: 4vh auto; border-radius: 20px; overflow: hidden; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 20px 50px rgba(11, 46, 107, .12); }
-.login-id { background: var(--brand); color: #fff; padding: 40px 40px 36px; display: grid; align-content: start; gap: 18px; }
+.login-id { background: var(--brand); color: #fff; padding: 40px 40px 36px; display: grid; align-content: center; gap: 18px; }
 .login-id .xf { color: #fff; width: 190px; margin: 6px 0 4px -6px; }
 .login-id h1 { font-size: 1.7rem; line-height: 1.2; font-weight: 700; max-width: 16ch; }
 .login-id p { margin: 0; color: #ffffffc8; max-width: 38ch; }
@@ -477,7 +507,6 @@ body.loading #topProgress { opacity: 1; }
 .inapp-actions .btn { text-decoration: none; }
 .inapp-url { font-size: .8rem; min-height: 34px; padding: 6px 10px; color: var(--muted); background: #fffdf5; }
 .inapp-try { font-size: .82rem; }
-.login-help { font-size: .82rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
 
 @media (max-width: 760px) {
   #toast { bottom: calc(80px + env(safe-area-inset-bottom)); }

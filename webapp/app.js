@@ -357,20 +357,26 @@ const TOAST_ICON = {
   info: '<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m1 15h-2v-6h2zm0-8h-2V7h2z"/>',
 };
 /** type: 'ok' | 'info' | 'err' (true = 'err' để tương thích lời gọi cũ). */
-function toast(msg, type = 'ok') {
+function toast(msg, type = 'ok', action = null) {
   if (type === true) type = 'err';
   else if (type === false || !TOAST_ICON[type]) type = 'ok';
   const box = $('#toast');
   const el = document.createElement('div');
   el.className = `t t-${type}`;
   el.setAttribute('role', type === 'err' ? 'alert' : 'status');
-  el.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${TOAST_ICON[type]}</svg><span></span><button type="button" aria-label="Đóng thông báo">×</button>`;
+  el.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${TOAST_ICON[type]}</svg><span></span><button type="button" class="t-x" aria-label="Đóng thông báo">×</button>`;
   el.querySelector('span').textContent = msg;
   const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 200); };
-  el.querySelector('button').onclick = close;
+  el.querySelector('.t-x').onclick = close;
+  if (action) {
+    const a = document.createElement('button');
+    a.type = 'button'; a.className = 't-act'; a.textContent = action.label;
+    a.onclick = () => { close(); action.onClick(); };
+    el.querySelector('span').appendChild(a);
+  }
   box.appendChild(el);
   while (box.children.length > 3) box.firstElementChild.remove();
-  setTimeout(close, { ok: 3200, info: 5000, err: 7000 }[type]);
+  setTimeout(close, action ? 9000 : { ok: 3200, info: 5000, err: 7000 }[type]);
 }
 
 // Thanh tiến trình trên cùng: chỉ hiện khi lời gọi máy chủ kéo dài quá 150ms
@@ -468,21 +474,17 @@ function showLogin(notice = '', kind = 'warn') {
     <div class="login-id">
       ${xfSymbol('energize')}
       <h1>Tiến độ hiện trường</h1>
-      <p>Báo cáo thi công, nhật ký và ảnh hiện trường cho các dự án lưới điện truyền tải.</p>
-      <ol class="login-steps">
-        <li>Đăng nhập bằng tài khoản Google</li>
-        <li>Lần đầu: khai họ tên, số điện thoại và đơn vị</li>
-        <li>Cập nhật tiến độ và ảnh ngay tại công trường</li>
-      </ol>
+      <p>Cập nhật tiến độ thi công ngay tại công trường.</p>
     </div>
     <div class="login-form">
-      <h2>Đăng nhập</h2>
-      <p>Dùng tài khoản Google của bạn. Ứng dụng chỉ đọc tên, email và ảnh đại diện.</p>
+      <h2>Xin chào!</h2>
+      <p>Đăng nhập bằng tài khoản Google để bắt đầu.</p>
       ${notice ? `<div class="notice ${kind}" role="${kind === 'err' ? 'alert' : 'status'}">${esc(notice)}</div>` : ''}
       ${inAppBrowser() ? inAppNotice(inAppBrowser()) + '<p class="inapp-try">Vẫn muốn thử đăng nhập ngay tại đây:</p>' : ''}
       <div id="gbtn"></div>
       ${!CFG.GOOGLE_CLIENT_ID ? '<div class="notice err">Chưa cấu hình GOOGLE_CLIENT_ID trong config.js.</div>' : ''}
-      <p class="login-help">Không đăng nhập được? Liên hệ quản trị viên PTC3 hoặc Tư vấn giám sát của dự án.</p>
+      <p class="login-privacy">Ứng dụng chỉ đọc tên, email và ảnh đại diện Google của bạn.</p>
+      <div class="login-help"><button type="button" class="linkish" data-act="help">Lần đầu sử dụng? Xem hướng dẫn</button><span>Cần hỗ trợ: liên hệ PTC3 hoặc Tư vấn giám sát.</span></div>
     </div>
   </section>`;
   if (window.google?.accounts?.id) {
@@ -569,6 +571,7 @@ async function boot() {
 
 function welcome() {
   const u = S.user, name = u.name || S.profile?.name || u.email;
+  if (S.justRegistered) { S.justRegistered = false; S.loginKind = ''; return toast(`Chào mừng ${name}! Bạn đã sẵn sàng cập nhật tiến độ.`, 'ok', { label: 'Xem hướng dẫn 1 phút', onClick: () => openGuide() }); }
   if (S.loginKind === 'fresh') toast(`Đã đăng nhập: ${name} (${u.email}) – ${ROLES[u.role] || u.role}${u.unit ? ', ' + u.unit : ''}`, 'ok');
   else if (S.loginKind === 'restore') toast(`Chào mừng trở lại, ${name}`, 'info');
   else if (S.loginKind === 'demo') toast('Bản demo: dữ liệu chỉ lưu trên trình duyệt này. Đổi vai trò ở menu tài khoản để xem thử phân quyền.', 'info');
@@ -724,15 +727,16 @@ function showRegister() {
   setChrome(false);
   renderUser();
   const p = S.profile || {};
+  const first = String(p.name || '').trim().split(/\s+/).pop();
   $('#main').innerHTML = `<form class="card auth-card" id="regForm">
-    <h2>Đăng ký sử dụng</h2>
-    <p class="muted">Tài khoản Google: <b>${esc(p.email)}</b></p>
-    <label class="field"><span>Họ và tên *</span><input type="text" name="name" required maxlength="100" value="${esc(p.name)}"></label>
-    <label class="field"><span>Số điện thoại</span><input type="tel" name="phone" maxlength="30" placeholder="09xx xxx xxx"></label>
-    <label class="field"><span>Đơn vị</span><select name="unit">${unitOptions('', 'Không thuộc đơn vị thi công (chỉ xem)')}</select></label>
+    <h2>Chào ${esc(first || 'bạn')}! Còn một bước nữa</h2>
+    <p class="muted">Cho biết đơn vị của bạn để ứng dụng hiện đúng công việc cần cập nhật.</p>
+    <label class="field"><span>Họ và tên</span><input type="text" name="name" required maxlength="100" value="${esc(p.name)}" autocomplete="name"></label>
+    <label class="field"><span>Số điện thoại <small>(không bắt buộc)</small></span><input type="tel" name="phone" maxlength="30" placeholder="09xx xxx xxx" autocomplete="tel"></label>
+    <label class="field"><span>Đơn vị</span><select name="unit">${unitOptions('', 'Không thuộc đơn vị nào (chỉ xem)')}</select></label>
     <div class="note-box" id="regNote">${regNote('')}</div>
-    <button class="btn block" type="submit">Gửi đăng ký</button>
-    <button class="btn ghost block" type="button" data-act="logout">Dùng tài khoản khác</button>
+    <button class="btn block" type="submit">Bắt đầu sử dụng</button>
+    <p class="reg-alt">Đang dùng <b>${esc(p.email)}</b> · <button type="button" class="linkish" data-act="logout">Dùng tài khoản khác</button></p>
   </form>`;
 }
 const isAdminUnit = (u) => !!u && (S.config.ADMIN_UNITS || []).includes(u);
@@ -744,8 +748,8 @@ function showPending() {
   setChrome(false);
   renderUser();
   $('#main').innerHTML = `<div class="card auth-card">
-    <h2>Tài khoản đang chờ duyệt</h2>
-    <p class="muted">Đăng ký của bạn đã được ghi nhận. Vui lòng liên hệ quản trị viên dự án để được kích hoạt, sau đó bấm “Kiểm tra lại”.</p>
+    <h2>Đã nhận đăng ký của bạn</h2>
+    <p class="muted">Tài khoản quản trị cần được duyệt trước khi dùng. Báo quản trị viên PTC3 hoặc Tư vấn giám sát, sau đó bấm “Kiểm tra lại”.</p>
     <button class="btn block" data-act="retry">Kiểm tra lại</button>
     <button class="btn ghost block" data-act="logout">Đăng xuất</button>
   </div>`;
@@ -762,6 +766,89 @@ async function logout() {
   S.sig = undefined;
   showLogin(`Đã đăng xuất${name ? ' tài khoản ' + name : ''}. Đăng nhập lại để tiếp tục.`, 'ok');
   toast('Đã đăng xuất', 'ok');
+}
+
+/* ============================ GIỚI THIỆU & HƯỚNG DẪN ============================ */
+const appVersion = () => (document.querySelector('script[src*="app.js"]')?.src.match(/[?&]v=([\w-]+)/) || [])[1] || 'bản cục bộ';
+const GUIDE = [
+  { id: 'start', title: 'Đăng nhập lần đầu', body: `
+    <ol>
+      <li>Mở link bằng <b>Chrome</b> (Android) hoặc <b>Safari</b> (iPhone). Không mở trong Zalo, Messenger: Google sẽ chặn đăng nhập.</li>
+      <li>Bấm <b>Đăng nhập bằng Google</b> và chọn tài khoản.</li>
+      <li>Điền họ tên, số điện thoại, chọn đơn vị rồi bấm <b>Bắt đầu sử dụng</b>.</li>
+    </ol>
+    <p class="tip">Mở nhanh như ứng dụng: Chrome › <b>⋮</b> › <i>Thêm vào màn hình chính</i>; Safari › <b>Chia sẻ</b> › <i>Thêm vào MH chính</i>.</p>` },
+  { id: 'update', title: 'Cập nhật tiến độ', body: `
+    <ol>
+      <li>Vào tab <b>Cập nhật</b>. Nhà thầu bấm <b>Chỉ việc của …</b> để chỉ thấy việc của đơn vị mình.</li>
+      <li>Bấm vào đầu việc cần báo cáo.</li>
+      <li>Kéo thanh <b>%</b> hoặc bấm nhanh 25 · 50 · 75 · 100.</li>
+      <li>Ghi tình hình hiện trường, chụp hoặc chọn ảnh (tối đa 6).</li>
+      <li>Bấm <b>Lưu cập nhật</b>.</li>
+    </ol>
+    <p class="tip">Đạt 100% thì đầu việc tự chuyển sang <i>Hoàn thành</i>. Việc của đơn vị khác chỉ xem được, không sửa được.</p>` },
+  { id: 'report', title: 'Xem tiến độ và báo cáo', body: `
+    <ul>
+      <li><b>Dashboard</b>: tiến độ thực tế so với kế hoạch, việc chậm, kế hoạch hôm nay. Bấm thẻ hạng mục chính để xem riêng hạng mục đó.</li>
+      <li><b>Cập nhật</b>: đổi kiểu xem Danh sách · Ô · Chi tiết · Nội dung; sắp xếp theo <i>Ngày sửa đổi</i> để thấy việc vừa được cập nhật.</li>
+      <li><b>Tiến độ</b>: biểu đồ Gantt kế hoạch và thực tế, vạch đỏ là hôm nay.</li>
+      <li><b>Nhật ký</b>: chọn ngày để xem ai đã cập nhật gì, bấm <i>In báo cáo ngày</i> hoặc <i>Xuất Excel</i>.</li>
+    </ul>` },
+  { id: 'admin', title: 'Quản trị (PTC3, Tư vấn giám sát)', body: `
+    <ol>
+      <li><b>Dự án</b>: tạo dự án, chọn nhà thầu tham gia.</li>
+      <li><b>Hạng mục chính</b>: thêm các hạng mục, ví dụ Thay MBA AT1, AT2.</li>
+      <li><b>Đầu việc</b>: bấm <i>File mẫu</i>, điền danh sách, rồi <i>Nhập từ Excel</i>; hoặc thêm từng việc.</li>
+      <li><b>Người dùng</b>: duyệt tài khoản, đổi vai trò và đơn vị, khóa tài khoản không còn dùng.</li>
+    </ol>` },
+  { id: 'faq', title: 'Gặp sự cố', body: `
+    <dl>
+      <dt>Bấm đăng nhập không được trong Zalo?</dt><dd>Mở link bằng Chrome hoặc Safari: bấm ⋮ hoặc ⋯ › <i>Mở bằng trình duyệt</i>.</dd>
+      <dt>Số liệu chưa thấy mới?</dt><dd>Bấm nút ⟳ ở góc trên. App cũng tự đồng bộ 5 phút một lần.</dd>
+      <dt>Bị yêu cầu đăng nhập lại?</dt><dd>Phiên Google kéo dài khoảng 1 giờ. Đăng nhập lại là xong, dữ liệu đã lưu không mất.</dd>
+      <dt>Không thấy nút Lưu cập nhật?</dt><dd>Đầu việc thuộc đơn vị khác hoặc tài khoản chỉ có quyền xem. Liên hệ quản trị viên để được phân công.</dd>
+    </dl>` },
+];
+function guideOpenId() {
+  const r = S.user?.role;
+  if (!S.user || $('.login, #regForm')) return 'start'; // mở từ màn đăng nhập / đăng ký
+  return r === 'admin' || r === 'manager' ? 'admin' : r === 'viewer' ? 'report' : 'update';
+}
+function openGuide(tab = 'guide') {
+  const open = guideOpenId();
+  const cp = typeof curProject === 'function' ? curProject() : null;
+  openDialog(`
+    <div class="dlg-head"><div><h2>Tiến độ hiện trường</h2><small>Giới thiệu và hướng dẫn sử dụng</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <div class="dlg-body guide">
+      <div class="subtabs" role="tablist">
+        <button type="button" role="tab" data-gtab="guide" aria-selected="${tab === 'guide'}" class="${tab === 'guide' ? 'on' : ''}">Hướng dẫn</button>
+        <button type="button" role="tab" data-gtab="about" aria-selected="${tab === 'about'}" class="${tab === 'about' ? 'on' : ''}">Giới thiệu</button>
+      </div>
+      <div data-gpanel="guide" ${tab === 'guide' ? '' : 'hidden'}>
+        ${GUIDE.filter((g) => g.id !== 'admin' || !S.user || isManager()).map((g) => `<details ${g.id === open ? 'open' : ''}><summary>${g.title}</summary><div class="g-body">${g.body}</div></details>`).join('')}
+      </div>
+      <div data-gpanel="about" ${tab === 'about' ? '' : 'hidden'}>
+        <p>Ứng dụng giúp các đơn vị tham gia dự án lưới điện truyền tải báo cáo tiến độ thi công ngay tại công trường, thay cho việc gửi file Excel qua lại.</p>
+        <ul>
+          <li><b>Nhà thầu</b> cập nhật % hoàn thành, ghi chú và ảnh cho đầu việc của đơn vị mình.</li>
+          <li><b>PTC3 và Tư vấn giám sát</b> theo dõi dashboard, Gantt, nhật ký; quản lý dự án, nhà thầu, đầu việc.</li>
+          <li>Dữ liệu lưu trên Google Sheet của dự án. Ảnh hiện trường lưu trong Google Drive, chỉ người đã đăng nhập mới xem được.</li>
+        </ul>
+        <dl class="about-meta">
+          ${cp ? `<dt>Dự án đang mở</dt><dd>${esc(cp.name)}</dd>` : ''}
+          ${S.user ? `<dt>Tài khoản</dt><dd>${esc(S.user.name)} – ${esc(ROLES[S.user.role] || S.user.role)}${S.user.unit ? ', ' + esc(S.user.unit) : ''}</dd>` : ''}
+          <dt>Hỗ trợ</dt><dd>Quản trị viên PTC3 hoặc Tư vấn giám sát của dự án</dd>
+          <dt>Phiên bản</dt><dd>${esc(appVersion())}</dd>
+        </dl>
+      </div>
+    </div>
+    <div class="dlg-foot"><button class="btn" data-act="close">Đã hiểu</button></div>`);
+  $$('#dlgBody [data-gtab]').forEach((b) => {
+    b.onclick = () => {
+      $$('#dlgBody [data-gtab]').forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-selected', on); });
+      $$('#dlgBody [data-gpanel]').forEach((p) => { p.hidden = p.dataset.gpanel !== b.dataset.gtab; });
+    };
+  });
 }
 
 /* ============================ ROUTER ============================ */
@@ -1719,6 +1806,8 @@ document.addEventListener('click', async (e) => {
     case 'export-log': return exportLog();
     case 'print': return window.print();
     case 'copy-link': return copyLink();
+    case 'help': $('#userMenu').hidden = true; return openGuide();
+    case 'about': $('#userMenu').hidden = true; return openGuide('about');
     case 'fv-dir': return setFv({ dir: S.fv.dir === 'asc' ? 'desc' : 'asc' });
     case 'mine': S.filters.unit = S.user.unit; return rerender();
     case 'new-task': return openTaskEdit(null);
@@ -1803,7 +1892,7 @@ document.addEventListener('submit', async (e) => {
     if (f.id === 'regForm') {
       const r = await api('register', d);
       S.user = r.user;
-      if (r.user.status === 'active') { toast('Đăng ký thành công – tài khoản đã được kích hoạt', 'ok'); S.loginKind = ''; return startSession(); }
+      if (r.user.status === 'active') { S.justRegistered = true; S.loginKind = ''; return startSession(); }
       toast('Đã gửi đăng ký – chờ quản trị viên duyệt', 'info');
       return showPending();
     }
