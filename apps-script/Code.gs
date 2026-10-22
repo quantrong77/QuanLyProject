@@ -24,7 +24,8 @@ var ROLES = ['admin', 'manager', 'contractor', 'viewer'];
 var USER_STATUS = ['pending', 'active', 'disabled'];
 var TASK_STATUS = ['', 'Chưa bắt đầu', 'Đang thi công', 'Tạm dừng', 'Hoàn thành'];
 var PROJECT_STATUS = ['Chuẩn bị', 'Đang thực hiện', 'Tạm dừng', 'Hoàn thành'];
-var UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
+// Loại nhà thầu mặc định; admin thêm/sửa/xóa trong app (lưu ở Config › UNIT_TYPES dạng JSON)
+var DEFAULT_UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
 var MAX_PHOTOS = 6;
 var MAX_PHOTO_B64 = 3 * 1024 * 1024;
 var MAX_IMPORT = 2000;
@@ -116,6 +117,7 @@ function route_(action, d, auth) {
     saveTask: [MGR, saveTask_, true],
     deleteTasks: [MGR, deleteTasks_, true],
     importTasks: [MGR, importTasks_, true],
+    syncTasks: [MGR, syncTasks_, true],
     bulkAssignUnit: [MGR, bulkAssignUnit_, true],
     bulkUpdateTasks: [MGR, bulkUpdateTasks_, true],
     saveProject: [ADMIN, saveProject_, true],
@@ -123,6 +125,8 @@ function route_(action, d, auth) {
     deletePackage: [ADMIN, deletePackage_, true],
     deleteProject: [ADMIN, deleteProject_, true],
     saveUnit: [ADMIN, saveUnit_, true],
+    saveUnitType: [ADMIN, saveUnitType_, true],
+    deleteUnitType: [ADMIN, deleteUnitType_, true],
     deleteUnit: [ADMIN, deleteUnit_, true],
     saveUser: [ADMIN, saveUser_, true]
   };
@@ -196,7 +200,7 @@ function canEditTask_(user, task) {
 
 function publicConfig_() {
   var c = getConfig_();
-  return { PROJECT_NAME: c.PROJECT_NAME || '', AUTO_APPROVE: c.AUTO_APPROVE === 'TRUE', ADMIN_UNITS: adminUnits_() };
+  return { PROJECT_NAME: c.PROJECT_NAME || '', AUTO_APPROVE: c.AUTO_APPROVE === 'TRUE', ADMIN_UNITS: adminUnits_(), UNIT_TYPES: unitTypes_() };
 }
 
 function me_(auth) {
@@ -467,7 +471,8 @@ function saveTask_(user, d) {
   t.updated_by = user.email;
   t.updated_at = nowIso_();
   if (isNew) appendRow_('Tasks', t); else writeRow_('Tasks', t);
-  return { task: clean_(t) };
+  var proj = linkUnits_(t.project_id, [t.unit]);
+  return { task: clean_(t), project: proj };
 }
 
 function importTasks_(user, d) {
@@ -487,7 +492,82 @@ function importTasks_(user, d) {
     return t;
   });
   appendRows_('Tasks', out);
-  return { tasks: out.map(clean_) };
+  var proj = linkUnits_(d.project_id, out.map(function (t) { return t.unit; }));
+  return { tasks: out.map(clean_), project: proj };
+}
+
+/**
+ * Nhập lại file Excel xuất từ app: dòng có id -> cập nhật các ô được gửi lên; dòng không có id -> thêm mới.
+ * Đổi % hoàn thành / ngày thực tế / trạng thái thì ghi thêm một dòng nhật ký "Cập nhật từ file Excel".
+ * Kiểm tra toàn bộ trước, chỉ ghi khi không có dòng lỗi.
+ */
+function syncTasks_(user, d) {
+  if (!projectExists_(d.project_id)) throw new Error('Vui lòng chọn dự án hợp lệ');
+  var rows = d.rows || [];
+  if (!rows.length) throw new Error('Không có dòng nào để cập nhật');
+  if (rows.length > MAX_IMPORT) throw new Error('Tối đa ' + MAX_IMPORT + ' dòng mỗi lần nhập');
+  var tasks = readTable_('Tasks'), pkgs = readTable_('Packages'), byId = {};
+  tasks.forEach(function (t) { byId[t.id] = t; });
+  var n = Number(nextId_('T', tasks).slice(1)), order = maxOrder_(tasks, d.project_id);
+  var now = nowIso_(), today = now.slice(0, 10), stamp = new Date().getTime().toString(36);
+  var created = [], changed = [], ups = [];
+  rows.forEach(function (r, i) {
+    try {
+      var t;
+      if (r.id) {
+        t = byId[r.id];
+        if (!t || t.project_id !== d.project_id) throw new Error('không có đầu việc mã ' + r.id + ' trong dự án này');
+        if (changed.indexOf(t) >= 0) throw new Error('mã ' + r.id + ' xuất hiện nhiều lần trong file');
+      } else {
+        t = { id: 'T' + pad3_(n + created.length), project_id: d.project_id, progress: 0, status: '', order: ++order };
+      }
+      applyTaskFields_(t, r, pkgs);
+      var log = false;
+      if (r.progress !== undefined && r.progress !== '') {
+        var pr = clampNum_(r.progress, 0, 100);
+        if (pr !== Number(t.progress || 0)) { t.progress = pr; log = true; }
+      }
+      ['actual_start', 'actual_end'].forEach(function (k) {
+        if (r[k] !== undefined) { var v = dateStr_(r[k]); if (v !== (t[k] || '')) { t[k] = v; log = true; } }
+      });
+      if (r.status !== undefined && TASK_STATUS.indexOf(r.status) >= 0 && r.status !== (t.status || '')) { t.status = r.status; log = true; }
+      if (log) {
+        var p = Number(t.progress || 0);
+        if (p >= 100) { t.status = 'Hoàn thành'; t.actual_end = t.actual_end || today; }
+        else { if (t.status === 'Hoàn thành') t.status = 'Đang thi công'; t.actual_end = ''; }
+        if (p > 0 && !t.actual_start) t.actual_start = today;
+        if (p > 0 && !t.status) t.status = 'Đang thi công';
+        ups.push({ id: 'U' + stamp + '_' + i, ts: now, report_date: today, task_id: t.id, email: user.email, user_name: user.name,
+          unit: user.unit, progress: p, status: t.status, actual_start: t.actual_start, actual_end: t.actual_end,
+          delay_days: t.delay_days, note: 'Cập nhật từ file Excel', photos: '' });
+      }
+      if (t.plan_start && t.plan_end && (t.plan_days === undefined || t.plan_days === '')) {
+        t.plan_days = Math.round((parseIso_(t.plan_end) - parseIso_(t.plan_start)) / 864e5 * 100) / 100;
+      }
+      t.updated_by = user.email;
+      t.updated_at = now;
+      (r.id ? changed : created).push(t);
+    } catch (e) { throw new Error('Dòng ' + (r._line || i + 2) + ': ' + e.message); }
+  });
+  writeRows_('Tasks', changed);
+  appendRows_('Tasks', created);
+  appendRows_('Updates', ups);
+  var proj = linkUnits_(d.project_id, created.concat(changed).map(function (t) { return t.unit; }));
+  return { created: created.map(clean_), changed: changed.map(clean_), updates: ups, project: proj };
+}
+
+/** Dự án có danh sách nhà thầu tham gia: tự thêm các nhà thầu vừa được gán. Trả về dự án nếu có thay đổi. */
+function linkUnits_(projectId, codes) {
+  var p = readTable_('Projects').filter(function (x) { return x.id === projectId; })[0];
+  if (!p) return null;
+  var list = String(p.units || '').split(',').filter(String);
+  if (!list.length) return null; // trống = tất cả nhà thầu
+  var add = codes.filter(function (c, i, a) { return c && list.indexOf(c) < 0 && a.indexOf(c) === i; });
+  if (!add.length) return null;
+  p.units = list.concat(add).join(',');
+  p.updated_at = nowIso_();
+  writeRow_('Projects', p);
+  return clean_(p);
 }
 
 function deleteTasks_(user, d) {
@@ -519,9 +599,14 @@ function bulkUpdateTasks_(user, d) {
     if (d.unit !== undefined) t.unit = d.unit;
     t.updated_by = user.email;
     t.updated_at = nowIso_();
-    writeRow_('Tasks', t);
   });
-  return { count: sel.length };
+  writeRows_('Tasks', sel);
+  var projects = [];
+  if (d.unit) {
+    sel.map(function (t) { return t.project_id; }).filter(function (x, i, a) { return a.indexOf(x) === i; })
+      .forEach(function (pid) { var p = linkUnits_(pid, [d.unit]); if (p) projects.push(p); });
+  }
+  return { count: sel.length, projects: projects };
 }
 
 /* ============================ CONTRACTORS (Units) ============================ */
@@ -537,7 +622,7 @@ function saveUnit_(user, d) {
   if (d.name !== undefined) u.name = str_(d.name, 200);
   if (!u.name) u.name = code;
   if (d.type !== undefined) {
-    if (d.type && UNIT_TYPES.indexOf(d.type) < 0) throw new Error('Loại nhà thầu không hợp lệ');
+    if (d.type && unitTypes_().indexOf(d.type) < 0) throw new Error('Loại nhà thầu không hợp lệ');
     u.type = d.type;
   }
   ['contact', 'phone', 'email'].forEach(function (k) { if (d[k] !== undefined) u[k] = str_(d[k], 200); });
@@ -558,6 +643,45 @@ function deleteUnit_(user, d) {
   });
   deleteRows_('Units', [u]);
   return { code: u.code, units: readTable_('Units').map(clean_) };
+}
+
+/* ---------- Loại nhà thầu ---------- */
+
+function unitTypes_() {
+  try {
+    var a = JSON.parse(getConfig_().UNIT_TYPES || '');
+    if (Array.isArray(a) && a.length) return a.map(String);
+  } catch (e) { /* chưa cấu hình hoặc sai định dạng: dùng mặc định */ }
+  return DEFAULT_UNIT_TYPES.slice();
+}
+
+/** Thêm loại mới (không có d.old) hoặc đổi tên loại d.old thành d.name – nhà thầu đang dùng loại cũ được đổi theo. */
+function saveUnitType_(user, d) {
+  var name = str_(d.name, 60), old = str_(d.old, 60), types = unitTypes_();
+  if (!name) throw new Error('Vui lòng nhập tên loại nhà thầu');
+  var dup = types.some(function (t) { return t.toLowerCase() === name.toLowerCase() && t !== old; });
+  if (dup) throw new Error('Loại "' + name + '" đã có');
+  if (old) {
+    var i = types.indexOf(old);
+    if (i < 0) throw new Error('Không tìm thấy loại "' + old + '"');
+    types[i] = name;
+    readTable_('Units').forEach(function (u) { if (u.type === old) { u.type = name; writeRow_('Units', u); } });
+  } else {
+    types.push(name);
+  }
+  setConfig_('UNIT_TYPES', JSON.stringify(types));
+  return { types: types, units: readTable_('Units').map(clean_) };
+}
+
+function deleteUnitType_(user, d) {
+  var name = str_(d.name, 60), types = unitTypes_();
+  if (types.indexOf(name) < 0) throw new Error('Không tìm thấy loại "' + name + '"');
+  var n = readTable_('Units').filter(function (u) { return u.type === name; }).length;
+  if (n) throw new Error('Không thể xóa: còn ' + n + ' nhà thầu thuộc loại "' + name + '". Hãy đổi loại cho các nhà thầu đó trước.');
+  if (types.length === 1) throw new Error('Phải giữ lại ít nhất một loại nhà thầu');
+  types.splice(types.indexOf(name), 1);
+  setConfig_('UNIT_TYPES', JSON.stringify(types));
+  return { types: types };
 }
 
 function unitExists_(code) {
@@ -638,6 +762,18 @@ function appendRows_(name, objs) {
 function writeRow_(name, obj) {
   if (!obj._row) throw new Error('Thiếu vị trí dòng');
   sheet_(name).getRange(obj._row, 1, 1, headers_(name).length).setNumberFormat('@').setValues([rowValues_(name, obj)]);
+}
+
+/** Ghi nhiều dòng: ít dòng thì ghi từng dòng, nhiều dòng thì ghi cả vùng một lần cho nhanh. */
+function writeRows_(name, objs) {
+  if (objs.length <= 15) { objs.forEach(function (o) { writeRow_(name, o); }); return; }
+  var sh = sheet_(name), n = headers_(name).length, last = sh.getLastRow();
+  var rng = sh.getRange(2, 1, last - 1, n);
+  var vals = rng.getValues().map(function (row) {
+    return row.map(function (v) { return typeof v === 'string' && /^[=+\-@]/.test(v) ? "'" + v : v; }); // giữ chặn công thức
+  });
+  objs.forEach(function (o) { vals[o._row - 2] = rowValues_(name, o); });
+  rng.setNumberFormat('@').setValues(vals);
 }
 
 function deleteRows_(name, objs) {

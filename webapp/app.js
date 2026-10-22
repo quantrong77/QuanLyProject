@@ -103,6 +103,20 @@ function projUnitList() {
   const codes = projectUnitCodes(curProject());
   return codes.length ? S.units.filter((u) => codes.includes(u.code)) : S.units;
 }
+/** Máy chủ tự thêm nhà thầu vào dự án khi gán: đồng bộ lại danh sách dự án trên máy. */
+function mergeProjects(r) {
+  [r?.project, ...(r?.projects || [])].filter(Boolean).forEach((p) => {
+    const ex = S.projects.find((x) => x.id === p.id);
+    if (ex) Object.assign(ex, p);
+  });
+}
+/** Nhà thầu của dự án trước; nhà thầu chưa tham gia ở nhóm riêng (chọn sẽ tự thêm vào dự án). */
+function unitSelectOptions(sel, empty) {
+  const inProj = projUnitList(), others = S.units.filter((u) => !inProj.includes(u));
+  const opt = (u) => `<option value="${esc(u.code)}" ${u.code === sel ? 'selected' : ''}>${esc(u.code)} – ${esc(u.name)}</option>`;
+  return `<option value="">${empty}</option>${inProj.map(opt).join('')}`
+    + (others.length ? `<optgroup label="Nhà thầu khác – chọn sẽ tự thêm vào dự án">${others.map(opt).join('')}</optgroup>` : '');
+}
 function setProject(id) {
   S.projectId = id;
   S.filters.section = '';
@@ -199,6 +213,15 @@ const Demo = {
   save() { try { localStorage.setItem(this.KEY, JSON.stringify(this.db)); } catch { /* bộ nhớ đầy: bỏ qua */ } },
   reset() { try { localStorage.removeItem(this.KEY); } catch { /* ignore */ } location.reload(); },
   me() { return this.db.users[0]; },
+  /** Giống linkUnits_ ở máy chủ: dự án có danh sách nhà thầu thì tự thêm nhà thầu vừa gán. */
+  link(pid, codes) {
+    const p = this.db.projects.find((x) => x.id === pid);
+    const list = String(p?.units || '').split(',').filter(Boolean);
+    const add = [...new Set(codes.filter((c) => c && !list.includes(c)))];
+    if (!p || !list.length || !add.length) return null;
+    p.units = [...list, ...add].join(',');
+    return p;
+  },
   call(action, d) {
     const db = this.db, me = this.me();
     const res = (() => {
@@ -239,7 +262,7 @@ const Demo = {
           }
           if (!(d.name ?? t.name)) throw new Error('Vui lòng nhập tên công việc');
           Object.assign(t, d, { id: t.id, updated_by: me.email, updated_at: dtstr(new Date()) });
-          return { task: t };
+          return { task: t, project: this.link(t.project_id, [t.unit]) };
         }
         case 'importTasks': {
           if (!db.projects.some((p) => p.id === d.project_id)) throw new Error('Vui lòng chọn dự án hợp lệ');
@@ -251,15 +274,48 @@ const Demo = {
             db.tasks.push(t);
             return t;
           });
-          return { tasks: out };
+          return { tasks: out, project: this.link(d.project_id, out.map((t) => t.unit)) };
         }
         case 'deleteTasks': db.tasks = db.tasks.filter((x) => !d.ids.includes(x.id)); return { ids: d.ids };
-        case 'bulkAssignUnit': db.tasks.forEach((t) => { if (d.task_ids.includes(t.id)) t.unit = d.unit; }); return { count: d.task_ids.length };
-        case 'bulkUpdateTasks': db.tasks.forEach((t) => {
-          if (!d.task_ids.includes(t.id)) return;
-          if (d.package_id !== undefined) t.package_id = d.package_id;
-          if (d.unit !== undefined) t.unit = d.unit;
-        }); return { count: d.task_ids.length };
+        case 'bulkAssignUnit': {
+          const sel = db.tasks.filter((t) => d.task_ids.includes(t.id));
+          sel.forEach((t) => { t.unit = d.unit; });
+          return { count: sel.length, projects: [...new Set(sel.map((t) => t.project_id))].map((pid) => this.link(pid, [d.unit])).filter(Boolean) };
+        }
+        case 'syncTasks': {
+          const created = [], changed = [], ups = [], stamp = Date.now().toString(36);
+          let order = Math.max(0, ...db.tasks.filter((x) => x.project_id === d.project_id).map((x) => +x.order || 0));
+          const work = d.rows.map((r, i) => {
+            const ex = r.id ? db.tasks.find((x) => x.id === r.id && x.project_id === d.project_id) : null;
+            if (r.id && !ex) throw new Error(`Dòng ${r._line}: không có đầu việc mã ${r.id} trong dự án này`);
+            if (!r.id && !r.name) throw new Error(`Dòng ${r._line}: thiếu tên đầu việc`);
+            return { r, ex, i };
+          });
+          work.forEach(({ r, ex, i }) => {
+            const { _line, ...f } = r;
+            const t = ex || { id: nextId('T', db.tasks), project_id: d.project_id, progress: 0, status: '', order: ++order };
+            if (!ex) db.tasks.push(t);
+            if (f.progress === '') delete f.progress; // như máy chủ: ô % trống = không đổi
+            const log = ['progress', 'actual_start', 'actual_end', 'status'].some((k) => f[k] !== undefined && String(f[k]) !== String(t[k] ?? ''));
+            Object.assign(t, f, { id: t.id, updated_by: me.email, updated_at: dtstr(new Date()) });
+            t.progress = +t.progress || 0;
+            if (log) {
+              if (t.progress >= 100) { t.status = 'Hoàn thành'; t.actual_end ||= today(); } else { if (t.status === 'Hoàn thành') t.status = 'Đang thi công'; t.actual_end = ''; }
+              if (t.progress > 0 && !t.actual_start) t.actual_start = today();
+              if (t.progress > 0 && !t.status) t.status = 'Đang thi công';
+              const up = { id: `U${stamp}_${i}`, ts: dtstr(new Date()), report_date: today(), task_id: t.id, email: me.email, user_name: me.name, unit: me.unit, progress: t.progress, status: t.status, actual_start: t.actual_start, actual_end: t.actual_end, delay_days: t.delay_days, note: 'Cập nhật từ file Excel', photos: '' };
+              db.updates.push(up); ups.push(up);
+            }
+            if (t.plan_start && t.plan_end && !t.plan_days) t.plan_days = +((parseD(t.plan_end) - parseD(t.plan_start)) / DAY).toFixed(2);
+            (ex ? changed : created).push(t);
+          });
+          return { created, changed, updates: ups, project: this.link(d.project_id, [...created, ...changed].map((t) => t.unit)) };
+        }
+        case 'bulkUpdateTasks': {
+          const sel = db.tasks.filter((t) => d.task_ids.includes(t.id));
+          sel.forEach((t) => { if (d.package_id !== undefined) t.package_id = d.package_id; if (d.unit !== undefined) t.unit = d.unit; });
+          return { count: sel.length, projects: d.unit ? [...new Set(sel.map((t) => t.project_id))].map((pid) => this.link(pid, [d.unit])).filter(Boolean) : [] };
+        }
         case 'savePackage': {
           let k = db.packages.find((x) => x.id === d.id);
           const pid = k ? k.project_id : d.project_id;
@@ -303,6 +359,20 @@ const Demo = {
           delete u.isNew;
           if (!u.name) u.name = code;
           return { unit: u, units: db.units };
+        }
+        case 'saveUnitType': {
+          const types = [...(db.config.UNIT_TYPES || UNIT_TYPES)], name = String(d.name || '').trim();
+          if (!name) throw new Error('Vui lòng nhập tên loại nhà thầu');
+          if (types.some((t) => t.toLowerCase() === name.toLowerCase() && t !== d.old)) throw new Error(`Loại "${name}" đã có`);
+          if (d.old) { types[types.indexOf(d.old)] = name; db.units.forEach((u) => { if (u.type === d.old) u.type = name; }); } else types.push(name);
+          db.config.UNIT_TYPES = types;
+          return { types, units: db.units };
+        }
+        case 'deleteUnitType': {
+          const n = db.units.filter((u) => u.type === d.name).length;
+          if (n) throw new Error(`Không thể xóa: còn ${n} nhà thầu thuộc loại "${d.name}". Hãy đổi loại cho các nhà thầu đó trước.`);
+          db.config.UNIT_TYPES = (db.config.UNIT_TYPES || UNIT_TYPES).filter((t) => t !== d.name);
+          return { types: db.config.UNIT_TYPES };
         }
         case 'deleteUnit': {
           const nT = db.tasks.filter((t) => t.unit === d.code).length, nU = db.users.filter((x) => x.unit === d.code).length;
@@ -1614,7 +1684,6 @@ async function showPhotos(ids) {
 /* ============================ TASK EDIT (admin/manager) ============================ */
 function openTaskEdit(id) {
   const t = id ? taskById(id) : { section: S.filters.section || '', unit: '', phase: '', package_id: S.filters.pkg && S.filters.pkg !== '__none' ? S.filters.pkg : projPackages()[0]?.id || '' };
-  const ulist = projUnitList().some((u) => u.code === t.unit) || !t.unit ? projUnitList() : [...projUnitList(), ...S.units.filter((u) => u.code === t.unit)];
   openDialog(`
     <div class="dlg-head"><h2>${id ? 'Sửa đầu việc ' + esc(t.wbs) : 'Thêm đầu việc – ' + esc(curProject()?.code || curProject()?.name || '')}</h2><button class="x" data-act="close" aria-label="Đóng">×</button></div>
     <form class="dlg-body" id="taskForm"><div class="form-grid">
@@ -1625,7 +1694,7 @@ function openTaskEdit(id) {
       <label class="field full"><span>Phần việc</span><input type="text" name="section" list="secList" value="${esc(t.section)}"><datalist id="secList">${sections().map((s) => `<option value="${esc(s)}">`).join('')}</datalist></label>
       <label class="field"><span>Nhóm</span><input type="text" name="group" value="${esc(t.group)}"></label>
       <label class="field"><span>Nhóm con</span><input type="text" name="subgroup" value="${esc(t.subgroup)}"></label>
-      <label class="field"><span>Nhà thầu thực hiện</span><select name="unit">${unitOptions(t.unit, '(Chưa gán)', ulist)}</select></label>
+      <label class="field"><span>Nhà thầu thực hiện</span><select name="unit">${unitSelectOptions(t.unit, '(Chưa gán)')}</select></label>
       <label class="field"><span>Thời gian KH (ngày)</span><input type="number" step="0.25" min="0" name="plan_days" value="${esc(t.plan_days)}"></label>
       <label class="field"><span>Bắt đầu KH</span><input type="datetime-local" name="plan_start" value="${esc(toLocalInput(t.plan_start))}"></label>
       <label class="field"><span>Kết thúc KH</span><input type="datetime-local" name="plan_end" value="${esc(toLocalInput(t.plan_end))}"></label>
@@ -1642,6 +1711,7 @@ function openTaskEdit(id) {
     if (id) d.id = id; else d.project_id = S.projectId;
     try {
       const r = await api('saveTask', d);
+      mergeProjects(r);
       const ex = taskById(r.task.id);
       if (ex) Object.assign(ex, r.task); else S.tasks.push(r.task);
       r.task.progress = +r.task.progress || 0;
@@ -1846,7 +1916,7 @@ function adminPackages() {
       return `<tr><td class="num">${esc(k.order)}</td><td><b>${esc(k.code)}</b></td><td>${esc(k.name)}${k.description ? `<br><small>${esc(k.description)}</small>` : ''}</td>
         <td style="white-space:nowrap">${fmtDate(k.start_date)} → ${fmtDate(k.end_date)}</td><td><span class="tag">${esc(k.status)}</span></td>
         <td class="num">${ts.length}</td><td class="num">${ts.filter((t) => klass(t, now) === 'late').length}</td><td class="num">${weightedPct(ts, (t) => t.progress / 100).toFixed(1)}%</td>
-        <td style="white-space:nowrap"><button class="btn ghost sm" data-pkg-tasks="${k.id}">Đầu việc</button> <button class="btn ghost sm" data-edit-pkg="${k.id}">Sửa</button>${S.user.role === 'admin' ? ` <button class="btn ghost sm danger-text" data-del-pkg="${k.id}">Xóa</button>` : ''}</td></tr>`;
+        <td style="white-space:nowrap"><button class="btn ghost sm" data-pkg-tasks="${k.id}">Đầu việc</button> ${ts.length ? `<button class="btn ghost sm" data-copy-pkg="${k.id}">Sao chép</button> ` : ''}<button class="btn ghost sm" data-edit-pkg="${k.id}">Sửa</button>${S.user.role === 'admin' ? ` <button class="btn ghost sm danger-text" data-del-pkg="${k.id}">Xóa</button>` : ''}</td></tr>`;
     }).join('') || '<tr><td colspan="9" class="empty">Chưa có hạng mục chính – bấm “Thêm hạng mục chính” (VD: Thay MBA AT1, Thay MBA AT2…)</td></tr>'}
     </tbody></table></div>`;
 }
@@ -1895,10 +1965,137 @@ async function deletePackage(id) {
   } catch (e) { toast(e.message, true); }
 }
 
+/* ---------- Loại nhà thầu (admin tự quản lý) ---------- */
+const unitTypes = () => (Array.isArray(S.config.UNIT_TYPES) && S.config.UNIT_TYPES.length ? S.config.UNIT_TYPES : UNIT_TYPES);
+function openUnitTypes() {
+  const types = unitTypes();
+  const count = (t) => S.units.filter((u) => u.type === t).length;
+  openDialog(`
+    <div class="dlg-head"><div><h2>Loại nhà thầu</h2><small>Dùng khi phân loại nhà thầu trong danh mục</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <div class="dlg-body">
+      <div class="table-wrap"><table><thead><tr><th>Loại</th><th class="num">Nhà thầu</th><th></th></tr></thead><tbody>
+        ${types.map((t) => `<tr><td>${esc(t)}</td><td class="num">${count(t)}</td>
+          <td style="white-space:nowrap;text-align:right"><button type="button" class="btn ghost sm" data-ut-edit="${esc(t)}">Đổi tên</button> <button type="button" class="btn ghost sm danger-text" data-ut-del="${esc(t)}" ${count(t) ? 'disabled title="Đang có nhà thầu thuộc loại này"' : ''}>Xóa</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <form id="utForm" class="ut-add"><label class="field"><span>Thêm loại mới</span><input type="text" name="name" maxlength="60" required placeholder="VD: Thí nghiệm hiệu chỉnh"></label><button class="btn" type="submit">Thêm</button></form>
+      <small class="muted">Đổi tên một loại thì các nhà thầu đang thuộc loại đó được đổi theo. Chỉ xóa được loại không còn nhà thầu nào.</small>
+    </div>
+    <div class="dlg-foot"><button class="btn ghost" data-act="close">Xong</button></div>`);
+  const apply = (r, msg) => {
+    S.config.UNIT_TYPES = r.types;
+    if (r.units) S.units = r.units;
+    toast(msg, 'ok');
+    if (S.view === 'admin') rerender(); // cập nhật bảng nhà thầu phía sau
+    openUnitTypes();
+  };
+  $('#utForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const name = e.target.name.value.trim();
+    if (!name) return;
+    try { apply(await api('saveUnitType', { name }), `Đã thêm loại “${name}”`); } catch (err) { toast(err.message, 'err'); }
+  };
+  $$('#dlgBody [data-ut-edit]').forEach((b) => {
+    b.onclick = () => {
+      const old = b.dataset.utEdit, td = b.closest('tr').firstElementChild;
+      td.innerHTML = `<form class="ut-rename"><input type="text" value="${esc(old)}" maxlength="60" required aria-label="Tên mới"><button class="btn sm" type="submit">Lưu</button></form>`;
+      const f = $('form', td), inp = $('input', f);
+      inp.focus(); inp.select();
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const name = inp.value.trim();
+        if (!name || name === old) return openUnitTypes();
+        try { apply(await api('saveUnitType', { old, name }), `Đã đổi “${old}” thành “${name}”`); } catch (err) { toast(err.message, 'err'); }
+      };
+    };
+  });
+  $$('#dlgBody [data-ut-del]').forEach((b) => {
+    b.onclick = async () => {
+      const name = b.dataset.utDel;
+      try { apply(await api('deleteUnitType', { name }), `Đã xóa loại “${name}”`); } catch (err) { toast(err.message, 'err'); }
+    };
+  });
+}
+
+/* ---------- Sao chép đầu việc sang hạng mục chính khác ---------- */
+const shiftIso = (s, ms) => { const d = parseD(s); if (!d) return ''; const n = new Date(d.getTime() + ms); return String(s).length > 10 ? dtstr(n) : dstr(n); };
+const replaceAllText = (s, from, to) => (from ? String(s ?? '').split(from).join(to) : String(s ?? ''));
+function openCopyTasks(ids) {
+  const src = ids.map(taskById).filter(Boolean).sort((a, b) => (+a.order || 0) - (+b.order || 0));
+  if (!src.length) return toast('Chọn ít nhất một đầu việc để sao chép', 'err');
+  const srcPkgIds = [...new Set(src.map((t) => t.package_id))];
+  const srcPkg = srcPkgIds.length === 1 ? pkgById(srcPkgIds[0]) : null;
+  const starts = src.map((t) => parseD(t.plan_start)).filter(Boolean);
+  const minStart = starts.length ? dayStart(new Date(Math.min(...starts))) : null;
+  // Hạng mục đích: dự án đang mở trước, rồi các dự án khác
+  const projs = [curProject(), ...S.projects.filter((p) => p.id !== S.projectId)].filter(Boolean);
+  const targets = projs.map((p) => ({ p, list: S.packages.filter((k) => k.project_id === p.id).sort((a, b) => (+a.order || 0) - (+b.order || 0)) })).filter((g) => g.list.length);
+  if (!targets.length) return toast('Chưa có hạng mục chính nào để sao chép sang. Tạo hạng mục chính trước.', 'err');
+  const def = targets[0].list.find((k) => k.id !== srcPkg?.id) || targets[0].list[0];
+  openDialog(`
+    <div class="dlg-head"><div><h2>Sao chép ${src.length} đầu việc</h2><small>Từ ${srcPkg ? esc(`${srcPkg.code} – ${srcPkg.name}`) : 'nhiều hạng mục'}</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <form class="dlg-body" id="cpForm">
+      <label class="field"><span>Sao chép sang hạng mục chính</span><select name="target">${targets.map((g) => `<optgroup label="${esc(g.p.name)}">${g.list.map((k) => `<option value="${k.id}" ${k.id === def.id ? 'selected' : ''}>${esc(k.code ? k.code + ' – ' : '')}${esc(k.name)}${k.id === srcPkg?.id ? ' (chính hạng mục này)' : ''}</option>`).join('')}</optgroup>`).join('')}</select></label>
+      <fieldset class="cp-dates"><legend>Ngày kế hoạch</legend>
+        <label class="chk"><input type="radio" name="dates" value="shift" ${minStart ? 'checked' : 'disabled'}> Dời lịch: việc sớm nhất bắt đầu ngày <input type="date" name="newStart" value="${minStart ? dstr(minStart) : ''}" ${minStart ? '' : 'disabled'}></label>
+        <label class="chk"><input type="radio" name="dates" value="keep"> Giữ nguyên ngày như hạng mục gốc</label>
+        <label class="chk"><input type="radio" name="dates" value="clear" ${minStart ? '' : 'checked'}> Bỏ trống, nhập sau</label>
+      </fieldset>
+      <div class="form-grid">
+        <label class="field"><span>Thay chữ trong tên đầu việc</span><input type="text" name="from" value="${esc(srcPkg?.code || '')}" placeholder="VD: AT1"></label>
+        <label class="field"><span>thành</span><input type="text" name="to" value="${esc(def.code || '')}" placeholder="VD: AT2"></label>
+      </div>
+      <label class="chk"><input type="checkbox" name="keepUnit" checked> Giữ nhà thầu như đầu việc gốc</label>
+      <div class="note-box">Bản sao bắt đầu từ 0%, không có ngày thực tế và nhật ký. Đầu việc gốc không thay đổi.</div>
+      <div><h3 style="margin-bottom:6px">Xem trước</h3><div class="table-wrap" style="max-height:34vh"><table><thead><tr><th>WBS</th><th>Pha</th><th>Đầu việc</th><th>Nhà thầu</th><th>Bắt đầu KH</th><th>Kết thúc KH</th></tr></thead><tbody id="cpPreview"></tbody></table></div></div>
+    </form>
+    <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="cpGo">Sao chép ${src.length} đầu việc</button></div>`);
+  const form = $('#cpForm');
+  let toTouched = false;
+  form.to.oninput = () => { toTouched = true; };
+  const build = () => {
+    const f = Object.fromEntries(new FormData(form));
+    const k = pkgById(f.target);
+    let ms = 0;
+    if (f.dates === 'shift' && f.newStart && minStart) ms = parseD(f.newStart) - minStart;
+    const rows = src.map((t) => ({
+      package_id: k.id, wbs: t.wbs, phase: t.phase, plan_days: t.plan_days,
+      name: replaceAllText(t.name, f.from, f.to), section: replaceAllText(t.section, f.from, f.to),
+      group: replaceAllText(t.group, f.from, f.to), subgroup: replaceAllText(t.subgroup, f.from, f.to), note: replaceAllText(t.note, f.from, f.to),
+      unit: f.keepUnit ? t.unit || '' : '',
+      plan_start: f.dates === 'clear' ? '' : f.dates === 'shift' ? shiftIso(t.plan_start, ms) : t.plan_start || '',
+      plan_end: f.dates === 'clear' ? '' : f.dates === 'shift' ? shiftIso(t.plan_end, ms) : t.plan_end || '',
+    }));
+    return { k, rows };
+  };
+  const preview = () => {
+    const { rows } = build();
+    $('#cpPreview').innerHTML = rows.slice(0, 50).map((r) => `<tr><td>${esc(r.wbs)}</td><td>${esc(r.phase)}</td><td>${esc(r.name)}</td><td>${esc(r.unit || '—')}</td><td>${fmtD(r.plan_start)}</td><td>${fmtD(r.plan_end)}</td></tr>`).join('')
+      + (rows.length > 50 ? `<tr><td colspan="6" class="empty">… và ${rows.length - 50} đầu việc khác</td></tr>` : '');
+  };
+  form.onchange = (e) => {
+    if (e.target.name === 'target' && !toTouched) form.to.value = pkgById(form.target.value)?.code || '';
+    if (e.target.name === 'newStart') form.querySelector('input[value=shift]').checked = true;
+    preview();
+  };
+  form.oninput = preview;
+  preview();
+  $('#cpGo').onclick = async () => {
+    const { k, rows } = build();
+    try {
+      const r = await api('importTasks', { project_id: k.project_id, tasks: rows });
+      mergeProjects(r);
+      r.tasks.forEach((t) => { t.progress = +t.progress || 0; S.tasks.push(t); });
+      closeDialog();
+      toast(`Đã sao chép ${r.tasks.length} đầu việc sang ${k.code || k.name}`, 'ok', { label: 'Xem đầu việc', onClick: () => { setProject(k.project_id); renderProjSel(); S.filters.pkg = k.id; S.adminTab = 'tasks'; go('admin'); } });
+      rerender();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+}
+
 /* ---------- Nhà thầu ---------- */
 function adminUnits() {
   $('#adminBody').innerHTML = `
-    <div class="toolbar"><small class="muted">${S.units.length} nhà thầu / đơn vị</small><button class="btn sm" data-act="new-unit">＋ Thêm nhà thầu</button></div>
+    <div class="toolbar"><small class="muted">${S.units.length} nhà thầu / đơn vị</small><button class="btn ghost sm" data-act="unit-types">Loại nhà thầu</button><button class="btn sm" data-act="new-unit">＋ Thêm nhà thầu</button></div>
     <div class="table-wrap"><table><thead><tr><th>Mã</th><th>Tên nhà thầu</th><th>Loại</th><th>Người liên hệ</th><th>Điện thoại</th><th>Email</th><th class="num">Dự án</th><th class="num">Đầu việc</th><th class="num">Người dùng</th><th></th></tr></thead><tbody>
     ${S.units.map((u) => `<tr><td><b>${esc(u.code)}</b>${isAdminUnit(u.code) ? ' <span class="tag">Quản trị</span>' : ''}</td><td>${esc(u.name)}${u.note ? `<br><small>${esc(u.note)}</small>` : ''}</td><td>${esc(u.type)}</td>
       <td>${esc(u.contact)}</td><td>${u.phone ? `<a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : ''}</td><td>${u.email ? `<a href="mailto:${esc(u.email)}">${esc(u.email)}</a>` : ''}</td>
@@ -1914,12 +2111,17 @@ function openUnitEdit(code) {
     <div class="dlg-head"><h2>${code ? 'Sửa nhà thầu ' + esc(code) : 'Thêm nhà thầu'}</h2><button class="x" data-act="close" aria-label="Đóng">×</button></div>
     <form class="dlg-body" id="unitForm"><div class="form-grid">
       <label class="field"><span>Mã nhà thầu *</span><input type="text" name="code" required maxlength="30" value="${esc(u.code)}" ${code ? 'readonly' : ''} placeholder="VD: PCC1" style="text-transform:uppercase"></label>
-      <label class="field"><span>Loại</span><select name="type">${UNIT_TYPES.map((t) => `<option ${t === u.type ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="field"><span>Loại</span><select name="type">${[...unitTypes(), ...(u.type && !unitTypes().includes(u.type) ? [u.type] : [])].map((t) => `<option ${t === u.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
       <label class="field full"><span>Tên đầy đủ *</span><input type="text" name="name" required maxlength="200" value="${esc(u.name)}"></label>
       <label class="field"><span>Người liên hệ / Chỉ huy trưởng</span><input type="text" name="contact" maxlength="200" value="${esc(u.contact)}"></label>
       <label class="field"><span>Điện thoại</span><input type="tel" name="phone" maxlength="50" value="${esc(u.phone)}"></label>
       <label class="field full"><span>Email</span><input type="text" name="email" maxlength="200" value="${esc(u.email)}"></label>
       <label class="field full"><span>Ghi chú</span><textarea name="note" maxlength="1000">${esc(u.note)}</textarea></label>
+      ${S.projects.length ? `<div class="field full"><span>Tham gia dự án</span><div class="check-grid">${S.projects.map((p) => {
+        const list = projectUnitCodes(p), all = !list.length;
+        const on = all || list.includes(u.code) || (!code && p.id === S.projectId);
+        return `<label title="${all ? 'Dự án chưa giới hạn nhà thầu: mọi nhà thầu đều tham gia' : ''}"><input type="checkbox" name="proj" value="${p.id}" ${on ? 'checked' : ''} ${all ? 'disabled' : ''}> ${esc(p.code || p.name)}${all ? ' <small>(tất cả nhà thầu)</small>' : ''}</label>`;
+      }).join('')}</div></div>` : ''}
     </div>${code ? '<small class="muted">Mã nhà thầu không đổi được vì đang gắn với đầu việc và người dùng.</small>' : ''}</form>
     <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="saveUnit">Lưu</button></div>`);
   $('#saveUnit').onclick = async () => {
@@ -1927,10 +2129,26 @@ function openUnitEdit(code) {
     if (!f.reportValidity()) return;
     const d = Object.fromEntries(new FormData(f));
     d.isNew = !code;
+    const want = new Set($$('input[name=proj]:checked:not(:disabled)', f).map((c) => c.value));
+    delete d.proj;
     try {
       const r = await api('saveUnit', d);
       S.units = r.units;
-      closeDialog(); toast('Đã lưu nhà thầu'); rerender();
+      // cập nhật danh sách nhà thầu tham gia của các dự án có giới hạn nhà thầu
+      const uc = r.unit.code, changed = [];
+      for (const p of S.projects) {
+        const list = projectUnitCodes(p);
+        if (!list.length) continue;
+        const has = list.includes(uc), should = want.has(p.id);
+        if (has === should) continue;
+        const units = should ? [...list, uc] : list.filter((c) => c !== uc);
+        const rp = await api('saveProject', { id: p.id, units });
+        Object.assign(p, rp.project);
+        changed.push(`${should ? 'thêm vào' : 'bỏ khỏi'} ${p.code || p.name}`);
+      }
+      closeDialog();
+      toast(`Đã lưu nhà thầu ${uc}${changed.length ? ' – ' + changed.join(', ') : ''}`);
+      rerender();
     } catch (e) { toast(e.message, true); }
   };
 }
@@ -1957,9 +2175,10 @@ function adminTasks() {
       <button class="btn ghost sm" data-act="tpl-tasks">⬇ File mẫu</button>
       <span style="flex:1"></span>
       <small class="muted" id="selCount">0 đã chọn</small>
-      <select id="bulkUnit" style="width:auto">${unitOptions('', '(Bỏ gán nhà thầu)', projUnitList())}</select>
+      <select id="bulkUnit" style="width:auto">${unitSelectOptions('', '(Bỏ gán nhà thầu)')}</select>
       <button class="btn ghost sm" data-act="bulk-assign">Gán nhà thầu</button>
       ${projPackages().length ? `<select id="bulkPkg" style="width:auto">${pkgOptions('', '(Bỏ hạng mục chính)')}</select><button class="btn ghost sm" data-act="bulk-pkg">Chuyển hạng mục</button>` : ''}
+      <button class="btn ghost sm" data-act="bulk-copy">Sao chép sang hạng mục…</button>
       <button class="btn ghost sm danger-text" data-act="bulk-delete">Xóa đã chọn</button>
       <input type="file" id="impFile" accept=".xlsx,.xls,.csv" hidden></div>
     <div class="table-wrap" style="max-height:65vh"><table><thead><tr><th><input type="checkbox" id="selAll" aria-label="Chọn tất cả"></th><th>HM chính</th><th>WBS</th><th>Pha</th><th>Đầu việc</th><th>Nhà thầu</th><th>Bắt đầu KH</th><th>Kết thúc KH</th><th class="num">Ngày</th><th class="num">%</th><th></th></tr></thead><tbody>
@@ -1972,7 +2191,18 @@ function adminTasks() {
   $('#selAll').onchange = (e) => { $$('.sel').forEach((c) => { c.checked = e.target.checked; }); upd(); };
 }
 
-const TPL_COLS = { 'Hạng mục chính': 'pkg', 'WBS': 'wbs', 'Hạng mục': 'section', 'Phần việc': 'section', 'Nhóm': 'group', 'Nhóm con': 'subgroup', 'Đầu việc': 'name', 'Pha': 'phase', 'Nhà thầu': 'unit', 'Bắt đầu KH': 'plan_start', 'Kết thúc KH': 'plan_end', 'Số ngày KH': 'plan_days', 'Ghi chú': 'note' };
+// Cột file Excel: file mẫu nhập mới và file "Xuất Excel" của app (để sửa hàng loạt rồi nhập lại)
+const TPL_COLS = {
+  'Mã ĐV': 'id', 'Hạng mục chính': 'pkg', 'WBS': 'wbs', 'Hạng mục': 'section', 'Phần việc': 'section', 'Nhóm': 'group', 'Nhóm con': 'subgroup',
+  'Đầu việc': 'name', 'Công việc': 'name', 'Pha': 'phase', 'Nhà thầu': 'unit', 'Đơn vị': 'unit',
+  'Bắt đầu KH': 'plan_start', 'Kết thúc KH': 'plan_end', 'Số ngày KH': 'plan_days', 'Ghi chú': 'note',
+  '% hoàn thành': 'progress', 'Bắt đầu TT': 'actual_start', 'Hoàn thành TT': 'actual_end', 'Trạng thái nhập': 'status',
+};
+const FIELD_LABEL = {
+  package_id: 'Hạng mục chính', wbs: 'WBS', section: 'Phần việc', group: 'Nhóm', subgroup: 'Nhóm con', name: 'Tên', phase: 'Pha', unit: 'Nhà thầu',
+  plan_start: 'BĐ KH', plan_end: 'KT KH', plan_days: 'Số ngày KH', note: 'Ghi chú', progress: '%', actual_start: 'BĐ TT', actual_end: 'KT TT', status: 'Trạng thái',
+};
+const DATE_FIELDS = ['plan_start', 'plan_end', 'actual_start', 'actual_end'];
 function downloadTemplate() {
   const u = projUnitList()[0]?.code || 'NNB';
   const k = (S.filters.pkg && pkgById(S.filters.pkg)) || projPackages()[0];
@@ -1992,6 +2222,30 @@ function normDate(v) {
   if (m) return `${m[3]}-${pad(m[2])}-${pad(m[1])}${m[4] ? `T${pad(m[4])}:${m[5]}` : ''}`;
   throw new Error(`ngày không hợp lệ "${s}"`);
 }
+/** Đọc một dòng Excel thành các trường đã chuẩn hóa; ném lỗi nếu dữ liệu sai. */
+function parseImportRow(r, ctx) {
+  const t = {};
+  Object.entries(TPL_COLS).forEach(([h, k]) => { if (r[h] !== undefined) t[k] = r[h] instanceof Date ? r[h] : String(r[h]).trim(); });
+  DATE_FIELDS.forEach((k) => { if (t[k] !== undefined) t[k] = normDate(t[k]); });
+  if (t.plan_start && t.plan_end && t.plan_end < t.plan_start) throw new Error('kết thúc KH trước bắt đầu KH');
+  if (t.unit) { const c = ctx.codes.get(t.unit.toUpperCase()); if (!c) throw new Error(`nhà thầu "${t.unit}" chưa có trong danh mục`); t.unit = c; }
+  if (t.pkg !== undefined) {
+    if (t.pkg) { const id = ctx.pkgKey.get(String(t.pkg).toLowerCase()); if (!id) throw new Error(`hạng mục chính "${t.pkg}" chưa có trong dự án`); t.package_id = id; } else t.package_id = '';
+    delete t.pkg;
+  }
+  if (t.plan_days !== undefined && t.plan_days !== '' && isNaN(+t.plan_days)) throw new Error('số ngày KH không phải số');
+  if (t.progress !== undefined && t.progress !== '') {
+    const v = +String(t.progress).replace('%', '').replace(',', '.');
+    if (isNaN(v) || v < 0 || v > 100) throw new Error(`% hoàn thành "${t.progress}" phải từ 0 đến 100`);
+    t.progress = v;
+  }
+  if (t.status !== undefined && t.status && !TASK_STATUS.includes(t.status)) throw new Error(`trạng thái "${t.status}" không hợp lệ (${TASK_STATUS.join(', ')})`);
+  return t;
+}
+const sameVal = (k, a, b) => {
+  if (k === 'progress' || k === 'plan_days') return (a === '' || a == null ? '' : +a) === (b === '' || b == null ? '' : +b);
+  return String(a ?? '').trim() === String(b ?? '').trim();
+};
 async function importTasksFile(file) {
   if (!window.XLSX) return toast('Thư viện Excel chưa tải xong', true);
   let rows;
@@ -1999,43 +2253,67 @@ async function importTasksFile(file) {
     const wb = XLSX.read(await file.arrayBuffer(), { cellDates: true });
     rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
   } catch { return toast('Không đọc được file Excel', true); }
-  const codes = new Map(S.units.map((u) => [u.code.toUpperCase(), u.code]));
-  const pkgKey = new Map(projPackages().flatMap((k) => [[String(k.code).toLowerCase(), k.id], [String(k.name).toLowerCase(), k.id]]).filter(([x]) => x));
-  const errs = [], tasks = [];
-  rows.forEach((r, i) => {
-    const t = {};
-    Object.entries(TPL_COLS).forEach(([h, k]) => { if (r[h] !== undefined) t[k] = r[h] instanceof Date ? r[h] : String(r[h]).trim(); });
-    if (!t.name && !t.wbs) return;
-    try {
-      if (!t.name) throw new Error('thiếu tên đầu việc');
-      t.plan_start = normDate(t.plan_start); t.plan_end = normDate(t.plan_end);
-      if (t.plan_start && t.plan_end && t.plan_end < t.plan_start) throw new Error('kết thúc KH trước bắt đầu KH');
-      if (t.unit) { const c = codes.get(t.unit.toUpperCase()); if (!c) throw new Error(`nhà thầu "${t.unit}" chưa có trong danh mục`); t.unit = c; }
-      if (t.pkg) { const id = pkgKey.get(String(t.pkg).toLowerCase()); if (!id) throw new Error(`hạng mục chính "${t.pkg}" chưa có trong dự án`); t.package_id = id; }
-      delete t.pkg;
-      if (t.plan_days !== undefined && t.plan_days !== '' && isNaN(+t.plan_days)) throw new Error('số ngày KH không phải số');
-      tasks.push(t);
-    } catch (e) { errs.push(`Dòng ${i + 2}: ${e.message}`); }
-  });
   const p = curProject();
-  openDialog(`
-    <div class="dlg-head"><h2>Nhập đầu việc vào ${esc(p.code || p.name)}</h2><button class="x" data-act="close" aria-label="Đóng">×</button></div>
-    <div class="dlg-body">
-      ${projPackages().length ? `<label class="field"><span>Hạng mục chính cho các dòng không ghi cột “Hạng mục chính”</span><select id="impPkg">${pkgOptions((S.filters.pkg && S.filters.pkg !== '__none' && S.filters.pkg) || projPackages()[0].id, '(Không thuộc hạng mục chính)')}</select></label>` : ''}
-      <div class="note-box">File <b>${esc(file.name)}</b>: ${tasks.length} đầu việc hợp lệ${errs.length ? `, <b style="color:var(--late)">${errs.length} dòng lỗi</b>` : ''}.</div>
-      ${errs.length ? `<div class="note-box" style="color:var(--late)">${errs.slice(0, 30).map(esc).join('<br>')}${errs.length > 30 ? '<br>…' : ''}</div><small class="muted">Sửa file rồi nhập lại – chỉ nhập khi không còn dòng lỗi.</small>` : ''}
-      <div class="table-wrap" style="max-height:45vh"><table><thead><tr><th>HM chính</th><th>WBS</th><th>Đầu việc</th><th>Pha</th><th>Nhà thầu</th><th>Bắt đầu</th><th>Kết thúc</th></tr></thead><tbody>
-        ${tasks.slice(0, 200).map((t) => `<tr><td>${t.package_id ? esc(pkgById(t.package_id).code || pkgById(t.package_id).name) : '<small class="muted">(mặc định)</small>'}</td><td>${esc(t.wbs)}</td><td>${esc(t.name)}<br><small>${esc(t.section)}</small></td><td>${esc(t.phase)}</td><td>${esc(t.unit)}</td><td>${fmtD(t.plan_start)}</td><td>${fmtD(t.plan_end)}</td></tr>`).join('')}
-      </tbody></table></div></div>
-    <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="doImport" ${errs.length || !tasks.length ? 'disabled' : ''}>Nhập ${tasks.length} đầu việc</button></div>`);
-  $('#doImport').onclick = async () => {
-    $('#doImport').disabled = true;
+  const ctx = {
+    codes: new Map(S.units.map((u) => [u.code.toUpperCase(), u.code])),
+    pkgKey: new Map(projPackages().flatMap((k) => [[String(k.code).toLowerCase(), k.id], [String(k.name).toLowerCase(), k.id]]).filter(([x]) => x)),
+  };
+  const errs = [], adds = [], edits = [];
+  let same = 0;
+  rows.forEach((r, i) => {
+    const line = i + 2;
     try {
-      const def = $('#impPkg')?.value || '';
-      const r = await api('importTasks', { project_id: p.id, tasks: tasks.map((t) => ({ ...t, package_id: t.package_id || def })) });
-      r.tasks.forEach((t) => { t.progress = +t.progress || 0; S.tasks.push(t); });
-      closeDialog(); toast(`Đã nhập ${r.tasks.length} đầu việc`); rerender();
-    } catch (e) { toast(e.message, true); $('#doImport').disabled = false; }
+      const t = parseImportRow(r, ctx);
+      if (!t.id && !t.name && !t.wbs) return; // dòng trống
+      if (t.id) {
+        const ex = S.tasks.find((x) => x.id === t.id && x.project_id === p.id);
+        if (!ex) throw new Error(`không có đầu việc mã ${t.id} trong dự án ${p.code || p.name}`);
+        if (edits.some((e) => e.id === t.id)) throw new Error(`mã ${t.id} xuất hiện nhiều lần`);
+        const diff = Object.keys(t).filter((k) => k !== 'id' && FIELD_LABEL[k] && !(k === 'progress' && t[k] === '') && !sameVal(k, t[k], ex[k]));
+        if (!diff.length) { same++; return; }
+        if (diff.includes('name') && !t.name) throw new Error('tên đầu việc không được để trống');
+        const row = { id: t.id, _line: line };
+        diff.forEach((k) => { row[k] = t[k]; });
+        edits.push({ id: t.id, row, ex, diff });
+      } else {
+        if (!t.name) throw new Error('thiếu tên đầu việc');
+        delete t.id;
+        // dòng mới: bỏ các ô tiến độ/thực tế để trống, không tạo nhật ký thừa
+        ['progress', 'actual_start', 'actual_end', 'status'].forEach((k) => { if (t[k] === '' || (k === 'progress' && +t[k] === 0)) delete t[k]; });
+        adds.push({ ...t, _line: line });
+      }
+    } catch (e) { errs.push(`Dòng ${line}: ${e.message}`); }
+  });
+  const show = (k, v) => (k === 'package_id' ? (pkgById(v)?.code || pkgById(v)?.name || '—') : DATE_FIELDS.includes(k) ? fmtD(v) : k === 'progress' ? `${v}%` : (v === '' || v == null ? '—' : v));
+  openDialog(`
+    <div class="dlg-head"><div><h2>Nhập từ Excel vào ${esc(p.code || p.name)}</h2><small>${esc(file.name)}</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <div class="dlg-body">
+      <div class="imp-sum"><span><b>${adds.length}</b> thêm mới</span><span><b>${edits.length}</b> cập nhật</span><span><b>${same}</b> không đổi</span>${errs.length ? `<span class="bad"><b>${errs.length}</b> dòng lỗi</span>` : ''}</div>
+      ${errs.length ? `<div class="note-box" style="color:var(--late)">${errs.slice(0, 30).map(esc).join('<br>')}${errs.length > 30 ? '<br>…' : ''}</div><small class="muted">Sửa file rồi nhập lại – chỉ áp dụng khi không còn dòng lỗi.</small>` : ''}
+      ${adds.length && projPackages().length ? `<label class="field"><span>Hạng mục chính cho dòng thêm mới không ghi cột “Hạng mục chính”</span><select id="impPkg">${pkgOptions((S.filters.pkg && S.filters.pkg !== '__none' && S.filters.pkg) || projPackages()[0].id, '(Không thuộc hạng mục chính)')}</select></label>` : ''}
+      ${edits.some((e) => e.diff.some((k) => ['progress', 'actual_start', 'actual_end', 'status'].includes(k))) ? '<div class="note-box">Thay đổi % hoàn thành, ngày thực tế hoặc trạng thái sẽ được ghi vào Nhật ký với nội dung “Cập nhật từ file Excel”.</div>' : ''}
+      <div class="table-wrap" style="max-height:46vh"><table><thead><tr><th>Thao tác</th><th>Mã</th><th>Đầu việc</th><th>Thay đổi</th></tr></thead><tbody>
+        ${edits.slice(0, 200).map((e) => `<tr><td><span class="pill c-doing">Cập nhật</span></td><td>${esc(e.id)}</td><td>${esc(e.ex.name)}<br><small>${esc(taskLabel(e.ex))}</small></td>
+          <td class="imp-diff">${e.diff.map((k) => `<div><b>${FIELD_LABEL[k]}</b>: <s>${esc(show(k, e.ex[k]))}</s> → ${esc(show(k, e.row[k]))}</div>`).join('')}</td></tr>`).join('')}
+        ${adds.slice(0, 200).map((t) => `<tr><td><span class="pill c-done">Thêm mới</span></td><td>—</td><td>${esc(t.name)}<br><small>${esc([t.wbs, t.phase && 'Pha ' + t.phase].filter(Boolean).join(' · '))}</small></td>
+          <td class="imp-diff"><div>${esc([t.unit, t.plan_start && `KH ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)}`].filter(Boolean).join(' · ') || '—')}</div></td></tr>`).join('')}
+        ${!edits.length && !adds.length ? '<tr><td colspan="4" class="empty">Không có thay đổi nào so với dữ liệu hiện tại</td></tr>' : ''}
+      </tbody></table></div></div>
+    <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="doImport" ${errs.length || (!adds.length && !edits.length) ? 'disabled' : ''}>Áp dụng ${adds.length + edits.length} thay đổi</button></div>`);
+  $('#doImport').onclick = async () => {
+    const def = $('#impPkg')?.value || '';
+    // ô Hạng mục chính trống ở dòng mới = dùng hạng mục mặc định chọn trong hộp thoại
+    const payload = [...edits.map((e) => e.row), ...adds.map((t) => ({ ...t, package_id: t.package_id || def }))];
+    try {
+      const r = await api('syncTasks', { project_id: p.id, rows: payload });
+      r.changed.forEach((t) => { const ex = taskById(t.id); if (ex) Object.assign(ex, t, { progress: +t.progress || 0 }); });
+      r.created.forEach((t) => { t.progress = +t.progress || 0; S.tasks.push(t); });
+      S.updates.push(...(r.updates || []));
+      mergeProjects(r);
+      closeDialog();
+      toast(`Đã nhập: ${r.created.length} thêm mới, ${r.changed.length} cập nhật`, 'ok');
+      rerender();
+    } catch (e) { toast(e.message, 'err'); }
   };
 }
 
@@ -2065,7 +2343,7 @@ function exportTasks() {
   const now = new Date();
   exportXlsx(`TienDo_${fileTag()}_${today()}.xlsx`, {
     'Tien do': filtered({ cls: '' }).map((t) => ({
-      'Hạng mục chính': pkgById(t.package_id)?.name || '', 'WBS': t.wbs, 'Phần việc': t.section, 'Nhóm': t.group, 'Nhóm con': t.subgroup, 'Công việc': t.name, 'Pha': t.phase, 'Đơn vị': t.unit,
+      'Mã ĐV': t.id, 'Hạng mục chính': pkgById(t.package_id)?.code || pkgById(t.package_id)?.name || '', 'WBS': t.wbs, 'Phần việc': t.section, 'Nhóm': t.group, 'Nhóm con': t.subgroup, 'Đầu việc': t.name, 'Pha': t.phase, 'Nhà thầu': t.unit,
       'Bắt đầu KH': t.plan_start, 'Kết thúc KH': t.plan_end, 'Số ngày KH': t.plan_days, 'Bắt đầu TT': t.actual_start, 'Hoàn thành TT': t.actual_end,
       '% hoàn thành': t.progress, 'Tình trạng': CLS[klass(t, now)].label, 'Trạng thái nhập': t.status, 'Số ngày chậm': t.delay_days,
       'Ghi chú': t.note, 'Cập nhật bởi': t.updated_by, 'Cập nhật lúc': t.updated_at,
@@ -2083,7 +2361,7 @@ function exportLog() {
 
 /* ============================ EVENTS ============================ */
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks],[data-fv],[data-sort]');
+  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks],[data-fv],[data-sort],[data-copy-pkg]');
   if (!el) {
     if (!e.target.closest('#userMenu,#userChip')) $('#userMenu').hidden = true;
     return;
@@ -2099,6 +2377,7 @@ document.addEventListener('click', async (e) => {
   if (ds.editProject) return openProjectEdit(ds.editProject);
   if (ds.delProject) return deleteProject(ds.delProject);
   if (ds.editUnit) return openUnitEdit(ds.editUnit);
+  if (ds.copyPkg) return openCopyTasks(S.tasks.filter((t) => t.package_id === ds.copyPkg).map((t) => t.id));
   if (ds.fv) return setFv({ mode: ds.fv });
   if (ds.sort) return setFv(S.fv.sort === ds.sort ? { dir: S.fv.dir === 'asc' ? 'desc' : 'asc' } : { sort: ds.sort, dir: ds.sort === 'modified' ? 'desc' : 'asc' });
   if (ds.pkg) { S.filters.pkg = S.filters.pkg === ds.pkg ? '' : ds.pkg; S.filters.section = ''; return rerender(); }
@@ -2149,6 +2428,8 @@ document.addEventListener('click', async (e) => {
       return;
     }
     case 'new-unit': return openUnitEdit(null);
+    case 'unit-types': return openUnitTypes();
+    case 'bulk-copy': return openCopyTasks($$('.sel:checked').map((c) => c.value));
     case 'import-tasks': return $('#impFile').click();
     case 'tpl-tasks': return downloadTemplate();
     case 'bulk-delete': {
@@ -2164,7 +2445,7 @@ document.addEventListener('click', async (e) => {
       const ids = $$('.sel:checked').map((c) => c.value);
       if (!ids.length) return toast('Chọn ít nhất một công việc', true);
       const unit = $('#bulkUnit').value;
-      try { await api('bulkAssignUnit', { task_ids: ids, unit }); S.tasks.forEach((t) => { if (ids.includes(t.id)) t.unit = unit; }); toast(`Đã gán ${ids.length} công việc cho ${unit || '(trống)'}`); rerender(); } catch (err) { toast(err.message, true); }
+      try { mergeProjects(await api('bulkAssignUnit', { task_ids: ids, unit })); S.tasks.forEach((t) => { if (ids.includes(t.id)) t.unit = unit; }); toast(`Đã gán ${ids.length} công việc cho ${unit || '(trống)'}`); rerender(); } catch (err) { toast(err.message, true); }
     }
   }
 });
