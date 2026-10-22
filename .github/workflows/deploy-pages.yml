@@ -1,0 +1,44 @@
+# Đưa web app (thư mục webapp/) lên GitHub Pages mỗi khi push lên nhánh main.
+# Chỉ xuất bản 4 file giao diện; dữ liệu dự án không nằm trong repo (xem .gitignore).
+name: Deploy web app to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['webapp/**', '.github/workflows/deploy-pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare site
+        run: |
+          mkdir _site
+          cp webapp/index.html webapp/app.js webapp/styles.css webapp/config.js _site/
+          # gắn phiên bản để trình duyệt luôn tải code mới sau mỗi lần cập nhật
+          sed -i -E "s/(app\.js|styles\.css|config\.js)\"/\1?v=${GITHUB_SHA::7}\"/g" _site/index.html
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

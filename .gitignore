@@ -1,0 +1,12 @@
+# Dữ liệu dự án – KHÔNG đưa lên GitHub
+*.xlsx
+*.xls
+data/
+webapp/demo-data.json
+linkggdrive.txt
+
+# Tạm
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
