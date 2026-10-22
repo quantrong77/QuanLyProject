@@ -946,23 +946,89 @@ function drawDashboardCharts(ts, now) {
 }
 
 /* ============================ FIELD UPDATE ============================ */
+// Kiểu xem & sắp xếp (giống File Explorer), lưu theo từng thiết bị
+const FIELD_VIEWS = {
+  list: { label: 'Danh sách', icon: 'M3 5h2v2H3zm4 0h14v2H7zM3 11h2v2H3zm4 0h14v2H7zM3 17h2v2H3zm4 0h14v2H7z' },
+  tiles: { label: 'Ô', icon: 'M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z' },
+  details: { label: 'Chi tiết', icon: 'M3 4h18v3H3zm0 5h18v2H3zm0 4h18v2H3zm0 4h18v2H3z' },
+  content: { label: 'Nội dung', icon: 'M3 4h6v6H3zm8 1h10v2H11zm0 3h7v1.5h-7zM3 14h6v6H3zm8 1h10v2H11zm0 3h7v1.5h-7z' },
+};
+const FIELD_SORTS = { wbs: 'Thứ tự WBS', name: 'Tên', modified: 'Ngày sửa đổi' };
+const FV_KEY = 'dl_fieldview';
+S.fv = (() => {
+  const def = { mode: 'tiles', sort: 'wbs', dir: 'asc', group: true };
+  try { return { ...def, ...JSON.parse(localStorage.getItem(FV_KEY) || '{}') }; } catch { return def; }
+})();
+function setFv(patch) {
+  Object.assign(S.fv, patch);
+  try { localStorage.setItem(FV_KEY, JSON.stringify(S.fv)); } catch { /* ignore */ }
+  rerender();
+}
+const viCollator = new Intl.Collator('vi', { numeric: true, sensitivity: 'base' });
+/** Ngày sửa đổi = lần cập nhật hiện trường hoặc lần sửa kế hoạch gần nhất. */
+function lastUpdateMap() {
+  const m = new Map();
+  S.updates.forEach((u) => { const x = m.get(u.task_id); if (!x || u.ts > x.ts) m.set(u.task_id, u); });
+  return m;
+}
+const modifiedOf = (t, lastUp) => { const a = t.updated_at || '', b = lastUp.get(t.id)?.ts || ''; return a > b ? a : b; };
+function sortTasks(list, lastUp) {
+  const { sort, dir } = S.fv, k = dir === 'desc' ? -1 : 1;
+  if (sort === 'name') {
+    return [...list].sort((a, b) => k * (viCollator.compare(a.name, b.name) || viCollator.compare(a.phase || '', b.phase || '') || viCollator.compare(a.wbs, b.wbs)));
+  }
+  if (sort === 'modified') {
+    return [...list].sort((a, b) => {
+      const ma = modifiedOf(a, lastUp), mb = modifiedOf(b, lastUp);
+      if (!ma || !mb) return ma ? -1 : mb ? 1 : 0; // chưa từng sửa luôn nằm cuối
+      return k * (ma < mb ? -1 : ma > mb ? 1 : 0);
+    });
+  }
+  return dir === 'desc' ? [...list].reverse() : list;
+}
+
 function renderField() {
+  const now = new Date(), lastUp = lastUpdateMap();
   const ts = filtered();
   const editable = ts.filter(canEdit).length;
-  const bySec = {};
-  ts.forEach((t) => (bySec[`${pkgCode(t)}|${t.section || 'Khác'}`] ||= []).push(t));
-  const now = new Date();
+  const groups = new Map();
+  ts.forEach((t) => {
+    const key = S.fv.group ? `${pkgCode(t)}|${t.section || 'Khác'}` : '|';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  });
+  const fv = S.fv;
+  const head = (key, n) => { const [pc, sec] = key.split('|'); return sec ? `${pc ? `<span class="tag unit">${esc(pc)}</span>` : ''}${esc(sec)} <small class="muted">(${n})</small>` : ''; };
+  let body;
+  if (!ts.length) body = '<div class="empty card">Không có đầu việc phù hợp bộ lọc</div>';
+  else if (fv.mode === 'details') body = detailsTable(groups, now, lastUp, head);
+  else {
+    const render = { list: listRow, tiles: taskCard, content: contentItem }[fv.mode] || taskCard;
+    const wrap = { list: 'fv-list', tiles: 'task-grid', content: 'fv-content' }[fv.mode] || 'task-grid';
+    body = [...groups].map(([key, list]) => `${S.fv.group ? `<div class="sec-title">${head(key, list.length)}</div>` : ''}
+      <div class="${wrap}">${sortTasks(list, lastUp).map((t) => render(t, now, lastUp)).join('')}</div>`).join('');
+  }
   $('#main').innerHTML = `
   <div class="toolbar"><h2>Cập nhật hiện trường</h2>
     ${S.user.role === 'contractor' && S.user.unit ? `<button class="btn ghost sm" data-act="mine">Chỉ việc của ${esc(S.user.unit)}</button>` : ''}
-    <small class="muted">${ts.length} công việc · ${editable} bạn được cập nhật</small></div>
+    <small class="muted">${ts.length} đầu việc · ${editable} bạn được cập nhật</small></div>
   ${filterBar()}
-  ${Object.entries(bySec).map(([key, list]) => { const [pc, sec] = key.split('|'); return `
-    <div class="sec-title">${pc ? `<span class="tag unit">${esc(pc)}</span>` : ''}${esc(sec)} <small class="muted">(${list.length})</small></div>
-    <div class="task-grid">${list.map((t) => taskCard(t, now)).join('')}</div>`; }).join('') || '<div class="empty card">Không có công việc phù hợp bộ lọc</div>'}`;
+  <div class="viewbar">
+    <div class="seg" role="radiogroup" aria-label="Kiểu xem">${Object.entries(FIELD_VIEWS).map(([k, v]) => `
+      <button type="button" role="radio" aria-checked="${fv.mode === k}" class="${fv.mode === k ? 'on' : ''}" data-fv="${k}" title="${v.label}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${v.icon}"/></svg><span>${v.label}</span></button>`).join('')}
+    </div>
+    <label class="sortby">Sắp xếp
+      <select id="fvSort">${Object.entries(FIELD_SORTS).map(([k, v]) => `<option value="${k}" ${fv.sort === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+    </label>
+    <button type="button" class="btn ghost sm" data-act="fv-dir" title="Đảo chiều sắp xếp">${fv.dir === 'desc' ? '↓ Giảm dần' : '↑ Tăng dần'}</button>
+    <label class="chk"><input type="checkbox" id="fvGroup" ${fv.group ? 'checked' : ''}> Nhóm theo phần việc</label>
+  </div>
+  ${body}`;
 }
-function taskCard(t, now) {
-  const c = klass(t, now), last = updatesOf(t.id)[0], ed = canEdit(t);
+
+function taskCard(t, now, lastUp) {
+  const c = klass(t, now), last = lastUp ? lastUp.get(t.id) : updatesOf(t.id)[0], ed = canEdit(t);
   return `<button type="button" class="task ${ed ? '' : 'locked'}" style="--k:var(${CLS[c].v})" data-task="${t.id}">
     <div class="top"><span class="tag">${esc(t.wbs)}</span>${t.phase ? `<span class="tag">Pha ${esc(t.phase)}</span>` : ''}${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : '<span class="tag">Chưa gán ĐV</span>'}${pill(c)}${+t.delay_days > 0 ? `<span class="tag warn">Chậm ${t.delay_days} ngày</span>` : ''}</div>
     <div class="name">${esc(t.name)}</div>
@@ -970,6 +1036,48 @@ function taskCard(t, now) {
     <div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><i style="width:${t.progress}%;background:var(${CLS[c].v})"></i></div><b style="font-size:.85rem">${t.progress}%</b></div>
     ${last ? `<div class="last">${esc(fmtTs(last.ts))} – ${esc(last.user_name)}: ${esc(last.note || last.status || '')}</div>` : ''}
   </button>`;
+}
+
+/** Danh sách: mỗi đầu việc một dòng gọn. */
+function listRow(t, now) {
+  const c = klass(t, now);
+  return `<button type="button" class="li ${canEdit(t) ? '' : 'locked'}" data-task="${t.id}" title="${esc(CLS[c].label)}">
+    <i class="dot" style="background:var(${CLS[c].v})" aria-hidden="true"></i>
+    <span class="li-wbs">${esc(t.wbs)}</span>
+    <span class="li-name">${esc(t.name)}</span>
+    <span class="li-ph" title="Pha">${t.phase ? esc(t.phase) : ''}</span>
+    <span class="li-unit">${esc(t.unit || '—')}</span>
+    <b class="li-pct" style="color:var(${CLS[c].v})">${t.progress}%</b>
+  </button>`;
+}
+
+/** Nội dung: đầy đủ thông tin và ghi chú gần nhất. */
+function contentItem(t, now, lastUp) {
+  const c = klass(t, now), last = lastUp.get(t.id), mod = modifiedOf(t, lastUp);
+  const nPh = last?.photos ? last.photos.split(',').filter(Boolean).length : 0;
+  return `<button type="button" class="ci ${canEdit(t) ? '' : 'locked'}" style="--k:var(${CLS[c].v})" data-task="${t.id}">
+    <div class="ci-main">
+      <div class="ci-name">${esc(t.name)}</div>
+      <div class="ci-meta"><span class="tag">${esc(taskLabel(t))}</span>${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : ''}${pill(c)}${+t.delay_days > 0 ? `<span class="tag warn">Chậm ${t.delay_days} ngày</span>` : ''}</div>
+      <div class="ci-dates">Kế hoạch ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)} · Thực tế ${fmtD(t.actual_start, false)}${t.actual_end ? ' → ' + fmtD(t.actual_end, false) : ''}</div>
+      ${last ? `<div class="ci-note"><b>${esc(last.user_name || last.email)}</b> <small>${fmtTs(last.ts)}</small>${nPh ? ` <small>· ${nPh} ảnh</small>` : ''}<br>${esc(last.note || last.status || '')}</div>` : '<div class="ci-note muted">Chưa có cập nhật hiện trường</div>'}
+    </div>
+    <div class="ci-side"><b>${t.progress}%</b><div class="bar"><i style="width:${t.progress}%;background:var(${CLS[c].v})"></i></div><small>${mod ? 'Sửa ' + fmtTs(mod) : ''}</small></div>
+  </button>`;
+}
+
+/** Chi tiết: bảng, bấm tiêu đề cột để sắp xếp. */
+function detailsTable(groups, now, lastUp, head) {
+  const th = (label, key) => {
+    if (!key) return `<th>${label}</th>`;
+    const on = S.fv.sort === key, arrow = on ? (S.fv.dir === 'desc' ? ' ↓' : ' ↑') : '';
+    return `<th aria-sort="${on ? (S.fv.dir === 'desc' ? 'descending' : 'ascending') : 'none'}"><button type="button" class="th-sort ${on ? 'on' : ''}" data-sort="${key}">${label}${arrow}</button></th>`;
+  };
+  const rows = [...groups].map(([key, list]) => `${S.fv.group ? `<tr class="grp"><td colspan="10">${head(key, list.length)}</td></tr>` : ''}
+    ${sortTasks(list, lastUp).map((t) => { const c = klass(t, now), mod = modifiedOf(t, lastUp); return `<tr data-task="${t.id}" tabindex="0" class="${canEdit(t) ? '' : 'locked'}">
+      <td><span class="pill c-${c}">${CLS[c].label}</span></td><td>${esc(t.wbs)}</td><td>${esc(t.phase)}</td><td class="d-name">${esc(t.name)}</td><td>${esc(t.unit || '—')}</td>
+      <td>${fmtD(t.plan_start)}</td><td>${fmtD(t.plan_end)}</td><td>${fmtD(t.actual_start, false)}</td><td class="num"><b>${t.progress}%</b></td><td>${mod ? fmtTs(mod) : '—'}</td></tr>`; }).join('')}`).join('');
+  return `<div class="table-wrap fv-details"><table><thead><tr>${th('Tình trạng')}${th('WBS', 'wbs')}${th('Pha')}${th('Đầu việc', 'name')}${th('Nhà thầu')}${th('Bắt đầu KH')}${th('Kết thúc KH')}${th('Bắt đầu TT')}${th('%')}${th('Ngày sửa đổi', 'modified')}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function openTask(id) {
@@ -1570,7 +1678,7 @@ function exportLog() {
 
 /* ============================ EVENTS ============================ */
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks]');
+  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks],[data-fv],[data-sort]');
   if (!el) {
     if (!e.target.closest('#userMenu,#userChip')) $('#userMenu').hidden = true;
     return;
@@ -1586,6 +1694,8 @@ document.addEventListener('click', async (e) => {
   if (ds.editProject) return openProjectEdit(ds.editProject);
   if (ds.delProject) return deleteProject(ds.delProject);
   if (ds.editUnit) return openUnitEdit(ds.editUnit);
+  if (ds.fv) return setFv({ mode: ds.fv });
+  if (ds.sort) return setFv(S.fv.sort === ds.sort ? { dir: S.fv.dir === 'asc' ? 'desc' : 'asc' } : { sort: ds.sort, dir: ds.sort === 'modified' ? 'desc' : 'asc' });
   if (ds.pkg) { S.filters.pkg = S.filters.pkg === ds.pkg ? '' : ds.pkg; S.filters.section = ''; return rerender(); }
   if (ds.editPkg) return openPackageEdit(ds.editPkg);
   if (ds.delPkg) return deletePackage(ds.delPkg);
@@ -1609,6 +1719,7 @@ document.addEventListener('click', async (e) => {
     case 'export-log': return exportLog();
     case 'print': return window.print();
     case 'copy-link': return copyLink();
+    case 'fv-dir': return setFv({ dir: S.fv.dir === 'asc' ? 'desc' : 'asc' });
     case 'mine': S.filters.unit = S.user.unit; return rerender();
     case 'new-task': return openTaskEdit(null);
     case 'new-project': return openProjectEdit(null);
@@ -1669,6 +1780,8 @@ document.addEventListener('change', async (e) => {
     if (t.value === '__new') { t.value = S.projectId || ''; return openProjectEdit(null); }
     setProject(t.value); renderProjSel(); return rerender();
   }
+  if (t.id === 'fvSort') return setFv({ sort: t.value, dir: t.value === 'modified' ? 'desc' : 'asc' });
+  if (t.id === 'fvGroup') return setFv({ group: t.checked });
   if (t.id === 'impFile' && t.files[0]) { const f = t.files[0]; t.value = ''; return importTasksFile(f); }
   if (t.dataset.uf) return saveUser(t.closest('tr').dataset.user, { [t.dataset.uf]: t.value });
   if (t.id === 'demoRole' || t.id === 'demoUnit') {
@@ -1720,7 +1833,11 @@ function openProfile() {
       <button class="btn" type="submit">Lưu</button></form>`);
 }
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#userMenu').hidden = true; });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') $('#userMenu').hidden = true;
+  // dòng bảng Chi tiết: Enter / Space để mở đầu việc
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-task]')) { e.preventDefault(); openTask(e.target.dataset.task); }
+});
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => { if (S.view === 'dashboard' && S.user) rerender(); });
 
 boot();
