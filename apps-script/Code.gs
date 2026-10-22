@@ -265,7 +265,10 @@ function bootstrap_(user) {
     updates: readTable_('Updates').slice(-3000).map(clean_),
     synced_at: nowIso_()
   };
-  if (user.role === 'admin') res.users = readTable_('Users').map(clean_);
+  if (user.role === 'admin') {
+    res.users = readTable_('Users').map(clean_);
+    res.dbUrl = ss_().getUrl(); // link Google Sheet database – chỉ gửi cho Quản trị
+  }
   return res;
 }
 

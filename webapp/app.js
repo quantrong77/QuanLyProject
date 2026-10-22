@@ -678,7 +678,7 @@ document.addEventListener('visibilitychange', () => {
 /** Tải toàn bộ dữ liệu; trả về true nếu dữ liệu khác lần tải trước. */
 async function reload() {
   const b = await api('bootstrap');
-  Object.assign(S, { user: b.user, config: b.config || {}, units: b.units || [], projects: b.projects || [], packages: b.packages || [], tasks: b.tasks || [], updates: b.updates || [], users: b.users || [] });
+  Object.assign(S, { user: b.user, config: b.config || {}, units: b.units || [], projects: b.projects || [], packages: b.packages || [], tasks: b.tasks || [], updates: b.updates || [], users: b.users || [], dbUrl: b.dbUrl || '' });
   if (!curProject()) {
     let saved = null;
     try { saved = localStorage.getItem('dl_project'); } catch { /* ignore */ }
@@ -849,6 +849,322 @@ function openGuide(tab = 'guide') {
       $$('#dlgBody [data-gpanel]').forEach((p) => { p.hidden = p.dataset.gpanel !== b.dataset.gtab; });
     };
   });
+}
+
+/* ============================ BÁO CÁO TIẾN ĐỘ (DOCX) – chỉ Quản trị ============================ */
+const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js';
+let docxLoading = null;
+function loadDocx() {
+  if (window.docx) return Promise.resolve(window.docx);
+  docxLoading ||= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = DOCX_URL;
+    s.onload = () => (window.docx ? resolve(window.docx) : reject(new Error('Thư viện DOCX không khởi tạo được')));
+    s.onerror = () => { docxLoading = null; reject(new Error('Không tải được thư viện tạo file Word. Kiểm tra mạng rồi thử lại.')); };
+    document.head.appendChild(s);
+  });
+  return docxLoading;
+}
+
+// Mở/ẩn nút Báo cáo: bấm 3 lần liên tiếp vào tên tab Quản trị (chỉ tài khoản Quản trị)
+let adminTabClicks = [];
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#tabAdmin') || S.user?.role !== 'admin') return;
+  const now = Date.now();
+  adminTabClicks = adminTabClicks.filter((x) => now - x < 900).concat(now);
+  if (adminTabClicks.length >= 3) {
+    adminTabClicks = [];
+    S.reportUnlocked = !S.reportUnlocked;
+    toast(S.reportUnlocked ? 'Đã mở chức năng Báo cáo tiến độ' : 'Đã ẩn chức năng Báo cáo', 'info');
+    setTimeout(() => { if (S.view === 'admin') rerender(); }, 0);
+  }
+});
+
+/* ---------- Tính trạng thái tại thời điểm báo cáo ---------- */
+const effTime = (u) => (u.report_date && u.report_date < String(u.ts).slice(0, 10) ? `${u.report_date}T23:59` : String(u.ts).slice(0, 16));
+/** Đầu việc "như tại thời điểm cut" (chuỗi yyyy-mm-ddThh:mm). */
+function taskAsOf(t, cut, hist) {
+  const h = (hist.get(t.id) || []).filter((u) => effTime(u) <= cut);
+  const withP = h.filter((u) => u.progress !== '' && u.progress != null);
+  let progress;
+  if (withP.length) progress = +withP[withP.length - 1].progress || 0;
+  else if (t.actual_end && t.actual_end <= cut) progress = 100;
+  else if (t.actual_start && t.actual_start <= cut) {
+    // không có lịch sử % (dữ liệu nhập từ Excel): đã xong sau thời điểm báo cáo -> ước tính tuyến tính
+    const s0 = parseD(t.actual_start), e0 = parseD(t.actual_end), c0 = parseD(cut);
+    progress = +t.progress >= 100 && e0 && e0 > s0 ? Math.min(99, Math.round(((c0 - s0) / (e0 - s0)) * 100)) : +t.progress || 0;
+  } else progress = 0;
+  const last = h[h.length - 1];
+  return {
+    ...t, progress,
+    status: last?.status || (progress >= 100 ? 'Hoàn thành' : progress > 0 ? 'Đang thi công' : ''),
+    actual_start: t.actual_start && t.actual_start <= cut ? t.actual_start : (progress > 0 ? t.actual_start : ''),
+    actual_end: progress >= 100 && t.actual_end && t.actual_end <= cut ? t.actual_end : '',
+    lastNote: [...h].reverse().find((u) => u.note)?.note || '',
+  };
+}
+function buildReport(opt) {
+  const cut = opt.cut, cutD = parseD(cut);
+  const hist = new Map();
+  [...S.updates].sort((a, b) => (effTime(a) < effTime(b) ? -1 : 1)).forEach((u) => { if (!hist.has(u.task_id)) hist.set(u.task_id, []); hist.get(u.task_id).push(u); });
+  const all = projTasks().filter((t) => inPkg(t, opt.pkg)).map((t) => taskAsOf(t, cut, hist));
+  const planned = all.filter((t) => t.plan_start);
+  const cls = (t) => klass(t, cutD);
+  const sum = (list) => {
+    const c = Object.fromEntries(Object.keys(CLS).map((k) => [k, 0]));
+    list.forEach((t) => c[cls(t)]++);
+    return {
+      n: list.length, c,
+      actual: weightedPct(list, (t) => t.progress / 100),
+      plan: weightedPct(list.filter((t) => t.plan_start), (t) => planFrac(t, cutD)),
+      actualPlanned: weightedPct(list.filter((t) => t.plan_start), (t) => t.progress / 100),
+    };
+  };
+  const groupBy = (keyFn, labelFn) => {
+    const m = new Map();
+    all.forEach((t) => { const k = keyFn(t); if (!m.has(k)) m.set(k, []); m.get(k).push(t); });
+    return [...m].map(([k, list]) => ({ label: labelFn(k), ...sum(list) }));
+  };
+  const late = all.filter((t) => cls(t) === 'late').map((t) => ({ t, over: planEnd(t) && cutD > planEnd(t) ? Math.ceil((cutD - planEnd(t)) / DAY) : 0 })).sort((a, b) => b.over - a.over);
+  const from = opt.logDays > 0 ? dtstr(new Date(cutD.getTime() - opt.logDays * DAY)) : null;
+  const ids = new Set(all.map((t) => t.id));
+  const log = from ? S.updates.filter((u) => ids.has(u.task_id) && effTime(u) > from && effTime(u) <= cut).sort((a, b) => (effTime(a) < effTime(b) ? -1 : 1)) : [];
+  const p = curProject(), k = opt.pkg ? pkgById(opt.pkg) : null;
+  return {
+    project: p, pkg: k, cut, created: new Date(), author: S.user?.name || '', total: sum(all), planned: planned.length,
+    byPkg: projPackages().length && !opt.pkg ? groupBy((t) => t.package_id || '', (id) => (pkgById(id) ? `${pkgById(id).code} – ${pkgById(id).name}` : '(Chưa phân hạng mục)')) : [],
+    bySec: groupBy((t) => `${pkgCode(t)}|${t.section || 'Khác'}`, (key) => { const [pc, s] = key.split('|'); return (pc && !opt.pkg ? pc + ' › ' : '') + s; }),
+    byUnit: groupBy((t) => t.unit || '', (u) => u || '(Chưa gán nhà thầu)'),
+    late, log, tasks: all, opt,
+  };
+}
+
+/* ---------- Xem trước (HTML) ---------- */
+const pct = (x) => `${(+x).toFixed(1)}%`;
+const dev = (r) => { const d = r.actualPlanned - r.plan; return `${d >= 0 ? '+' : ''}${d.toFixed(1)}%`; };
+const fmtFull = (s) => { const d = parseD(s); return d ? `${pad(d.getHours())}:${pad(d.getMinutes())} ngày ${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}` : ''; };
+function reportSections(R) {
+  const o = R.opt, sec = [];
+  sec.push({ title: 'Tổng quan', kind: 'summary' });
+  if (R.byPkg.length) sec.push({ title: 'Tiến độ theo hạng mục chính', kind: 'groups', rows: R.byPkg });
+  if (o.secGroups) sec.push({ title: 'Tiến độ theo phần việc', kind: 'groups', rows: R.bySec });
+  if (o.secUnits) sec.push({ title: 'Tiến độ theo nhà thầu', kind: 'groups', rows: R.byUnit });
+  if (o.secLate) sec.push({ title: `Đầu việc chậm tiến độ (${R.late.length})`, kind: 'late' });
+  if (o.secDetail) sec.push({ title: 'Chi tiết tiến độ từng đầu việc', kind: 'detail' });
+  if (o.logDays > 0) sec.push({ title: `Nhật ký hiện trường ${o.logDays} ngày gần nhất (${R.log.length} lượt)`, kind: 'log' });
+  const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+  return sec.map((s, i) => ({ ...s, no: ROMAN[i] }));
+}
+const GROUP_HEAD = ['Hạng mục', 'Số việc', 'KH đến kỳ', 'Thực tế', 'Chênh lệch', 'Hoàn thành', 'Chậm'];
+const groupRow = (g) => [g.label, g.n, pct(g.plan), pct(g.actual), dev(g), g.c.done, g.c.late];
+const LATE_HEAD = ['WBS', 'Pha', 'Đầu việc', 'Nhà thầu', 'KT kế hoạch', '% TT', 'Quá hạn', 'Ghi chú gần nhất'];
+const lateRow = ({ t, over }) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_end), `${t.progress}%`, over ? `${over} ngày` : 'Chưa triển khai', t.lastNote];
+const DETAIL_HEAD = ['WBS', 'Pha', 'Đầu việc', 'Nhà thầu', 'BĐ KH', 'KT KH', 'BĐ TT', 'KT TT', '%', 'Tình trạng'];
+const detailRow = (t, cutD) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_start), fmtD(t.plan_end), fmtD(t.actual_start, false), fmtD(t.actual_end, false), `${t.progress}%`, CLS[klass(t, cutD)].label];
+const LOG_HEAD = ['Thời điểm', 'Đầu việc', 'Đơn vị', 'Người cập nhật', '%', 'Nội dung'];
+const logRow = (u) => { const t = taskById(u.task_id); return [fmtTs(u.ts), t ? `${taskLabel(t)} ${t.name}` : u.task_id, u.unit || t?.unit || '', u.user_name || u.email, u.progress === '' || u.progress == null ? '' : `${u.progress}%`, u.note]; };
+function detailGroups(R) {
+  const m = new Map();
+  R.tasks.forEach((t) => { const k = `${pkgCode(t)}|${t.section || 'Khác'}`; if (!m.has(k)) m.set(k, []); m.get(k).push(t); });
+  return [...m].map(([k, list]) => { const [pc, s] = k.split('|'); return { label: (pc && !R.pkg ? pc + ' › ' : '') + s, list }; });
+}
+function reportHtml(R) {
+  const cutD = parseD(R.cut);
+  const tbl = (head, rows, cls = '') => `<table class="rp-t ${cls}"><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${head.length}" class="rp-empty">Không có</td></tr>`}</tbody></table>`;
+  const body = reportSections(R).map((s) => {
+    let h = `<h2>${s.no}. ${esc(s.title)}</h2>`;
+    if (s.kind === 'summary') {
+      const T = R.total;
+      h += `<p>Tính đến ${esc(fmtFull(R.cut))}, ${esc(R.pkg ? 'hạng mục ' + R.pkg.name : 'dự án')} có <b>${T.n}</b> đầu việc (${R.planned} việc có kế hoạch). Tiến độ thực tế đạt <b>${pct(T.actual)}</b>; với các việc có kế hoạch, thực tế <b>${pct(T.actualPlanned)}</b> so với kế hoạch đến kỳ <b>${pct(T.plan)}</b> (chênh lệch <b>${dev(T)}</b>).</p>`;
+      h += tbl(['Hoàn thành', 'Đang thi công', 'Chậm tiến độ', 'Tạm dừng', 'Chưa đến hạn', 'Chưa có kế hoạch'], [[T.c.done, T.c.doing, T.c.late, T.c.paused, T.c.todo, T.c.unplanned]]);
+    } else if (s.kind === 'groups') h += tbl(GROUP_HEAD, s.rows.map(groupRow));
+    else if (s.kind === 'late') h += tbl(LATE_HEAD, R.late.map(lateRow), 'rp-small');
+    else if (s.kind === 'detail') h += detailGroups(R).map((g) => `<h3>${esc(g.label)}</h3>${tbl(DETAIL_HEAD, g.list.map((t) => detailRow(t, cutD)), 'rp-small')}`).join('');
+    else if (s.kind === 'log') h += tbl(LOG_HEAD, R.log.map(logRow), 'rp-small');
+    return h;
+  }).join('');
+  return `<article class="rp-page">
+    <header class="rp-head"><div>${esc(R.project?.owner || '')}</div><div>Ngày lập: ${pad(R.created.getDate())}/${pad(R.created.getMonth() + 1)}/${R.created.getFullYear()}</div></header>
+    <h1>BÁO CÁO TIẾN ĐỘ THI CÔNG</h1>
+    <p class="rp-sub">Dự án: <b>${esc(R.project?.name || '')}</b>${R.pkg ? `<br>Hạng mục chính: <b>${esc(R.pkg.code)} – ${esc(R.pkg.name)}</b>` : ''}<br>Số liệu tính đến: <b>${esc(fmtFull(R.cut))}</b></p>
+    ${body}
+    <table class="rp-sign"><tr><td><b>NGƯỜI LẬP</b><br><br><br><br>${esc(R.author)}</td><td><b>XÁC NHẬN</b><br><br><br><br>&nbsp;</td></tr></table>
+  </article>`;
+}
+
+/* ---------- Tạo DOCX ---------- */
+async function reportDocx(R) {
+  const d = await loadDocx();
+  const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType, HeadingLevel, PageOrientation, BorderStyle, ShadingType, Header, Footer, PageNumber } = d;
+  const cutD = parseD(R.cut);
+  const F = 'Times New Roman';
+  const P = (text, o = {}) => new Paragraph({ alignment: o.align, spacing: { after: o.after ?? 120, before: o.before ?? 0 }, heading: o.heading,
+    children: (Array.isArray(text) ? text : [text]).map((x) => (typeof x === 'string' ? new TextRun({ text: x, font: F, size: o.size || 24, bold: o.bold }) : x)) });
+  const B = (text) => new TextRun({ text: String(text), font: F, size: 24, bold: true });
+  const cell = (text, o = {}) => new TableCell({
+    shading: o.head ? { type: ShadingType.CLEAR, color: 'auto', fill: 'DCE3F0' } : undefined,
+    columnSpan: o.span,
+    margins: { top: 40, bottom: 40, left: 80, right: 80 },
+    children: [new Paragraph({ alignment: o.align, children: [new TextRun({ text: String(text ?? ''), font: F, size: o.size || 20, bold: o.head || o.bold })] })],
+  });
+  const table = (head, rows, size = 20, widths) => new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    columnWidths: widths,
+    rows: [new TableRow({ tableHeader: true, children: head.map((h) => cell(h, { head: true, size, align: AlignmentType.CENTER })) }),
+      ...(rows.length ? rows.map((r) => new TableRow({ cantSplit: true, children: r.map((c) => cell(c, { size })) }))
+        : [new TableRow({ children: [cell('Không có', { span: head.length, size })] })])],
+  });
+  const H = (text) => P(text, { bold: true, size: 26, before: 240, after: 120, heading: HeadingLevel.HEADING_2 });
+  const children = [
+    P(R.project?.owner || '', { size: 22, after: 0 }),
+    P(`Ngày lập: ${pad(R.created.getDate())}/${pad(R.created.getMonth() + 1)}/${R.created.getFullYear()}`, { size: 22, align: AlignmentType.RIGHT }),
+    P('BÁO CÁO TIẾN ĐỘ THI CÔNG', { bold: true, size: 32, align: AlignmentType.CENTER, before: 240, after: 120 }),
+    P(['Dự án: ', B(R.project?.name || '')], { align: AlignmentType.CENTER, after: 40 }),
+    ...(R.pkg ? [P(['Hạng mục chính: ', B(`${R.pkg.code} – ${R.pkg.name}`)], { align: AlignmentType.CENTER, after: 40 })] : []),
+    P(['Số liệu tính đến: ', B(fmtFull(R.cut))], { align: AlignmentType.CENTER, after: 240 }),
+  ];
+  reportSections(R).forEach((s) => {
+    children.push(H(`${s.no}. ${s.title}`));
+    if (s.kind === 'summary') {
+      const T = R.total;
+      children.push(P([`Tính đến ${fmtFull(R.cut)}, ${R.pkg ? 'hạng mục ' + R.pkg.name : 'dự án'} có `, B(T.n), ` đầu việc (${R.planned} việc có kế hoạch). Tiến độ thực tế đạt `, B(pct(T.actual)),
+        '; với các việc có kế hoạch, thực tế ', B(pct(T.actualPlanned)), ' so với kế hoạch đến kỳ ', B(pct(T.plan)), ' (chênh lệch ', B(dev(T)), ').'], { align: AlignmentType.JUSTIFIED }));
+      children.push(table(['Hoàn thành', 'Đang thi công', 'Chậm tiến độ', 'Tạm dừng', 'Chưa đến hạn', 'Chưa có kế hoạch'], [[T.c.done, T.c.doing, T.c.late, T.c.paused, T.c.todo, T.c.unplanned]], 22));
+    } else if (s.kind === 'groups') children.push(table(GROUP_HEAD, s.rows.map(groupRow), 20));
+    else if (s.kind === 'late') children.push(table(LATE_HEAD, R.late.map(lateRow), 18));
+    else if (s.kind === 'detail') {
+      detailGroups(R).forEach((g) => {
+        children.push(P(g.label, { bold: true, size: 22, before: 160, after: 80 }));
+        children.push(table(DETAIL_HEAD, g.list.map((t) => detailRow(t, cutD)), 17));
+      });
+    } else if (s.kind === 'log') children.push(table(LOG_HEAD, R.log.map(logRow), 18));
+  });
+  const noBorder = { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' };
+  const nb = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder };
+  const signCell = (title, name) => new TableCell({ borders: nb, children: [P(title, { bold: true, align: AlignmentType.CENTER, after: 900 }), P(name, { bold: true, align: AlignmentType.CENTER })] });
+  children.push(P('', { after: 240 }));
+  children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, borders: nb, rows: [new TableRow({ children: [signCell('NGƯỜI LẬP', R.author), signCell('XÁC NHẬN', '')] })] }));
+  const doc = new Document({
+    creator: R.author, title: 'Báo cáo tiến độ thi công', description: R.project?.name,
+    styles: {
+      default: { document: { run: { font: F, size: 24 } } },
+      // mục lớn hiện trong khung Navigation của Word
+      paragraphStyles: [{ id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+        run: { font: F, size: 26, bold: true, color: '000000' }, paragraph: { spacing: { before: 240, after: 120 }, keepNext: true } }],
+    },
+    sections: [{
+      properties: { page: { size: { orientation: R.opt.landscape ? PageOrientation.LANDSCAPE : PageOrientation.PORTRAIT }, margin: { top: 1134, bottom: 1134, left: 1418, right: 1134 } } },
+      headers: { default: new Header({ children: [P(`${R.project?.name || ''} – Báo cáo tiến độ đến ${fmtFull(R.cut)}`, { size: 18, align: AlignmentType.RIGHT, after: 0 })] }) },
+      footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ children: ['Trang ', PageNumber.CURRENT, ' / ', PageNumber.TOTAL_PAGES], font: F, size: 18 })] })] }) },
+      children,
+    }],
+  });
+  return Packer.toBlob(doc);
+}
+
+/* ---------- Lưu vào thư mục trên máy (File System Access API) ---------- */
+const canPickDir = () => typeof window.showDirectoryPicker === 'function';
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('dl_report', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      try {
+        const tx = req.result.transaction('kv', mode), st = tx.objectStore('kv');
+        const r = fn(st);
+        tx.oncomplete = () => resolve(r?.result);
+        tx.onerror = () => reject(tx.error);
+      } catch (e) { reject(e); }
+    };
+  });
+}
+async function savedDir() { try { return await idb('readonly', (st) => st.get('dir')); } catch { return null; } }
+async function pickDir() {
+  const h = await window.showDirectoryPicker({ id: 'bao-cao-tien-do', mode: 'readwrite' });
+  try { await idb('readwrite', (st) => st.put(h, 'dir')); } catch { /* không lưu được thì lần sau hỏi lại */ }
+  return h;
+}
+async function saveReportFile(blob, name) {
+  if (!canPickDir()) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    return { where: 'thư mục Tải xuống (Downloads) của trình duyệt' };
+  }
+  let dir = await savedDir();
+  if (dir && (await dir.queryPermission({ mode: 'readwrite' })) !== 'granted' && (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') dir = null;
+  if (!dir) dir = await pickDir();
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(blob);
+  await w.close();
+  return { where: `thư mục “${dir.name}”` };
+}
+
+/* ---------- Hộp thoại báo cáo ---------- */
+function openReport() {
+  if (S.user?.role !== 'admin') return toast('Chỉ tài khoản Quản trị được xuất báo cáo', 'err');
+  const now = new Date();
+  const o = S.reportOpt ||= { cut: dtstr(now), pkg: S.filters.pkg && S.filters.pkg !== '__none' ? S.filters.pkg : '', secGroups: true, secUnits: true, secLate: true, secDetail: true, logDays: 7, landscape: true };
+  openDialog(`
+    <div class="dlg-head"><div><h2>Báo cáo tiến độ thi công</h2><small>${esc(curProject()?.name || '')}</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <div class="dlg-body rp-wrap">
+      <form class="rp-opts" id="rpForm">
+        <label class="field"><span>Số liệu tính đến</span><input type="datetime-local" name="cut" value="${esc(o.cut)}" max="${esc(dtstr(now))}" required></label>
+        ${projPackages().length ? `<label class="field"><span>Phạm vi</span><select name="pkg">${pkgOptions(o.pkg, 'Toàn dự án')}</select></label>` : ''}
+        <label class="field"><span>Nhật ký hiện trường</span><select name="logDays">${[[0, 'Không đưa vào'], [1, '1 ngày gần nhất'], [7, '7 ngày gần nhất'], [30, '30 ngày gần nhất']].map(([v, l]) => `<option value="${v}" ${+o.logDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <fieldset><legend>Nội dung</legend>
+          <label class="chk"><input type="checkbox" name="secGroups" ${o.secGroups ? 'checked' : ''}> Theo phần việc</label>
+          <label class="chk"><input type="checkbox" name="secUnits" ${o.secUnits ? 'checked' : ''}> Theo nhà thầu</label>
+          <label class="chk"><input type="checkbox" name="secLate" ${o.secLate ? 'checked' : ''}> Việc chậm tiến độ</label>
+          <label class="chk"><input type="checkbox" name="secDetail" ${o.secDetail ? 'checked' : ''}> Chi tiết từng đầu việc</label>
+          <label class="chk"><input type="checkbox" name="landscape" ${o.landscape ? 'checked' : ''}> Trang ngang (A4)</label>
+        </fieldset>
+        <div class="rp-save"><small id="rpDir">${canPickDir() ? 'Lưu vào thư mục bạn chọn trên máy' : 'Trình duyệt này lưu vào thư mục Tải xuống'}</small>
+          ${canPickDir() ? '<button type="button" class="linkish" id="rpPickDir">Chọn thư mục lưu…</button>' : ''}</div>
+      </form>
+      <div class="rp-preview" id="rpPreview" aria-label="Xem trước báo cáo"></div>
+    </div>
+    <div class="dlg-foot"><button class="btn ghost" data-act="close">Đóng</button><button class="btn" id="rpExport" data-own-busy>Xuất file Word (.docx)</button></div>`);
+  $('#dlg').classList.add('wide');
+  $('#dlg').addEventListener('close', () => $('#dlg').classList.remove('wide'), { once: true });
+  const form = $('#rpForm');
+  const read = () => {
+    const f = Object.fromEntries(new FormData(form));
+    Object.assign(o, { cut: f.cut || dtstr(now), pkg: f.pkg || '', logDays: +f.logDays || 0,
+      secGroups: !!f.secGroups, secUnits: !!f.secUnits, secLate: !!f.secLate, secDetail: !!f.secDetail, landscape: !!f.landscape });
+    return o;
+  };
+  const preview = () => {
+    const R = buildReport(read());
+    $('#rpPreview').innerHTML = reportHtml(R);
+    $('#rpPreview').classList.toggle('landscape', o.landscape);
+    return R;
+  };
+  form.onchange = preview;
+  form.oninput = (e) => { if (e.target.name === 'cut') preview(); };
+  preview();
+  loadDocx().catch(() => {}); // tải sẵn thư viện trong lúc xem trước
+  savedDir().then((h) => { if (h && $('#rpDir')) $('#rpDir').textContent = `Lưu vào thư mục “${h.name}”`; });
+  $('#rpPickDir')?.addEventListener('click', async () => {
+    try { const h = await pickDir(); $('#rpDir').textContent = `Lưu vào thư mục “${h.name}”`; } catch { /* người dùng hủy */ }
+  });
+  $('#rpExport').onclick = async () => {
+    if (!form.reportValidity()) return;
+    const btn = $('#rpExport');
+    btn.disabled = true; btn.classList.add('busy');
+    try {
+      const R = preview();
+      const blob = await reportDocx(R);
+      const c = R.cut.replace(/[-:]/g, '').replace('T', '_');
+      const name = `BaoCao_TienDo_${fileTag()}${R.pkg ? '_' + String(R.pkg.code || R.pkg.id).replace(/[^\w-]+/g, '_') : ''}_${c}.docx`;
+      const r = await saveReportFile(blob, name);
+      toast(`Đã lưu ${name} vào ${r.where}`, 'ok');
+    } catch (e) {
+      if (e?.name !== 'AbortError') toast(e.message || 'Không xuất được báo cáo', 'err');
+    } finally { btn.disabled = false; btn.classList.remove('busy'); }
+  };
 }
 
 /* ============================ ROUTER ============================ */
@@ -1431,7 +1747,9 @@ function renderAdmin() {
   const pend = S.users.filter((u) => u.status === 'pending').length;
   const cp = curProject();
   $('#main').innerHTML = `
-    <div class="toolbar"><h2>Quản trị</h2></div>
+    <div class="toolbar"><h2>Quản trị</h2>
+      ${S.user.role === 'admin' ? `<button class="btn ghost sm" data-act="open-db" title="Mở Google Sheet chứa dữ liệu dự án"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 3C7.6 3 4 4.3 4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6c0-1.7-3.6-3-8-3m6 15c-.4.5-2.6 1.3-6 1.3S6.4 18.5 6 18v-2.3c1.5.8 3.7 1.1 6 1.1s4.5-.3 6-1.1zm0-4.5c-.4.5-2.6 1.3-6 1.3s-5.6-.8-6-1.3v-2.3c1.5.8 3.7 1.1 6 1.1s4.5-.3 6-1.1zM12 8.4c-3.4 0-5.6-.8-6-1.3V7c.4-.5 2.6-1.3 6-1.3s5.6.8 6 1.3c-.4.5-2.6 1.4-6 1.4"/></svg>Database</button>` : ''}
+      ${S.reportUnlocked && S.user.role === 'admin' && cp ? '<button class="btn sm" data-act="report">Báo cáo tiến độ (.docx)</button>' : ''}</div>
     <div class="subtabs">${tabs.map((k) => `<button data-atab="${k}" class="${tab === k ? 'on' : ''}">${ADMIN_TABS[k]}${k === 'users' && pend ? ` (${pend} chờ duyệt)` : ''}${(k === 'tasks' || k === 'packages') && cp ? ` – ${esc(cp.code || cp.name)}` : ''}</button>`).join('')}</div>
     <div id="adminBody"></div>`;
   ({ projects: adminProjects, packages: adminPackages, units: adminUnits, tasks: adminTasks, users: adminUsers })[tab]();
@@ -1806,6 +2124,12 @@ document.addEventListener('click', async (e) => {
     case 'export-log': return exportLog();
     case 'print': return window.print();
     case 'copy-link': return copyLink();
+    case 'report': return openReport();
+    case 'open-db':
+      if (DEMO) return toast('Bản demo không có Google Sheet – dữ liệu demo lưu trên trình duyệt này.', 'info');
+      if (!S.dbUrl) return toast('Máy chủ chưa gửi link Google Sheet. Cập nhật Code.gs mới lên Apps Script và tạo phiên bản triển khai mới.', 'err');
+      window.open(S.dbUrl, '_blank', 'noopener');
+      return toast('Đã mở Google Sheet database trong tab mới. Nếu Google báo không có quyền, nhờ chủ sở hữu file chia sẻ cho email của bạn.', 'info');
     case 'help': $('#userMenu').hidden = true; return openGuide();
     case 'about': $('#userMenu').hidden = true; return openGuide('about');
     case 'fv-dir': return setFv({ dir: S.fv.dir === 'asc' ? 'desc' : 'asc' });
