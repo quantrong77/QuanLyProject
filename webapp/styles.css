@@ -413,6 +413,14 @@ body.loading #topProgress { opacity: 1; }
 .notice.warn { background: #fff7e0; border-color: #f2d48a; color: #6b4a00; }
 .notice.ok { background: #e8f7ee; border-color: #a9dfbf; color: #10592f; }
 .notice.err { background: #fdecea; border-color: #f3b4ad; color: #8a1f14; }
+.inapp { background: #fff7e0; border: 1px solid #f2d48a; color: #4d3600; border-radius: 12px; padding: 14px 16px; display: grid; gap: 8px; }
+.inapp h3 { font-size: 1rem; color: #6b4a00; }
+.inapp p { color: #4d3600; font-size: .9rem; }
+.inapp ol { margin: 0; padding-left: 20px; display: grid; gap: 4px; font-size: .9rem; }
+.inapp-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.inapp-actions .btn { text-decoration: none; }
+.inapp-url { font-size: .8rem; min-height: 34px; padding: 6px 10px; color: var(--muted); background: #fffdf5; }
+.inapp-try { font-size: .82rem; }
 .login-help { font-size: .82rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
 
 @media (max-width: 760px) {
@@ -424,9 +432,13 @@ body.loading #topProgress { opacity: 1; }
   .login-id h1 { font-size: 1.35rem; }
   .login-form { padding: 28px 20px 36px; }
   .login-form #gbtn { justify-content: center; }
+  /* Mở từ Zalo/Messenger: đưa hướng dẫn lên đầu, thu gọn phần giới thiệu */
+  .login.is-inapp .login-form { order: -1; padding-top: 20px; }
+  .login.is-inapp .login-id { padding: 18px 20px; }
+  .login.is-inapp .login-id .xf, .login.is-inapp .login-steps { display: none; }
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .notice.warn, :root:not([data-theme="light"]) .netbar { background: #3a2f12; border-color: #6b5520; color: #f6dc9a; }
+  :root:not([data-theme="light"]) .notice.warn, :root:not([data-theme="light"]) .netbar, :root:not([data-theme="light"]) .inapp, :root:not([data-theme="light"]) .inapp p, :root:not([data-theme="light"]) .inapp h3 { background: #3a2f12; border-color: #6b5520; color: #f6dc9a; }
   :root:not([data-theme="light"]) .notice.ok { background: #12301f; border-color: #24603d; color: #9fe0b8; }
   :root:not([data-theme="light"]) .notice.err { background: #3a1714; border-color: #6e2a23; color: #f4b2aa; }
 }

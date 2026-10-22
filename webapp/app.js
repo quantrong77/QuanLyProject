@@ -464,7 +464,7 @@ function showLogin(notice = '', kind = 'warn') {
   setChrome(false);
   $('#userBox').hidden = true;
   destroyCharts();
-  $('#main').innerHTML = `<section class="login">
+  $('#main').innerHTML = `<section class="login${inAppBrowser() ? ' is-inapp' : ''}">
     <div class="login-id">
       ${xfSymbol('energize')}
       <h1>Tiến độ hiện trường</h1>
@@ -479,6 +479,7 @@ function showLogin(notice = '', kind = 'warn') {
       <h2>Đăng nhập</h2>
       <p>Dùng tài khoản Google của bạn. Ứng dụng chỉ đọc tên, email và ảnh đại diện.</p>
       ${notice ? `<div class="notice ${kind}" role="${kind === 'err' ? 'alert' : 'status'}">${esc(notice)}</div>` : ''}
+      ${inAppBrowser() ? inAppNotice(inAppBrowser()) + '<p class="inapp-try">Vẫn muốn thử đăng nhập ngay tại đây:</p>' : ''}
       <div id="gbtn"></div>
       ${!CFG.GOOGLE_CLIENT_ID ? '<div class="notice err">Chưa cấu hình GOOGLE_CLIENT_ID trong config.js.</div>' : ''}
       <p class="login-help">Không đăng nhập được? Liên hệ quản trị viên PTC3 hoặc Tư vấn giám sát của dự án.</p>
@@ -488,6 +489,45 @@ function showLogin(notice = '', kind = 'warn') {
     google.accounts.id.renderButton($('#gbtn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', locale: 'vi', width: 280 });
   }
 }
+/* ---------- Trình duyệt nhúng (Zalo, Messenger…): Google chặn đăng nhập ---------- */
+/** Trả về { name, os } nếu đang mở trong trình duyệt nhúng của một ứng dụng, ngược lại null. */
+function inAppBrowser(ua = navigator.userAgent) {
+  const os = /iPhone|iPad|iPod/i.test(ua) ? 'ios' : /Android/i.test(ua) ? 'android' : 'other';
+  const known = [
+    [/Zalo/i, 'Zalo'], [/MessengerForiOS|FB_IAB\/MESSENGER|Messenger/i, 'Messenger'], [/FBAN|FBAV|FB_IAB|FBIOS/i, 'Facebook'],
+    [/Instagram/i, 'Instagram'], [/musical_ly|BytedanceWebview|TikTok/i, 'TikTok'], [/\bLine\//i, 'LINE'],
+  ];
+  for (const [re, name] of known) if (re.test(ua)) return { name, os };
+  if (os === 'android' && /; wv\)/.test(ua)) return { name: '', os };
+  if (os === 'ios' && !/Safari\//.test(ua)) return { name: '', os };
+  return null;
+}
+const appUrl = () => location.href.split('#')[0].split('?')[0];
+function inAppNotice(b) {
+  const url = appUrl(), ios = b.os === 'ios', where = b.name || 'một ứng dụng khác';
+  const steps = ios
+    ? '<li>Bấm <b>⋯</b> hoặc biểu tượng la bàn ở góc màn hình</li><li>Chọn <b>Mở bằng Safari</b> (hoặc <b>Mở trong trình duyệt</b>)</li><li>Không thấy mục đó? Bấm <b>Sao chép link</b> rồi dán vào Safari</li>'
+    : '<li>Bấm <b>⋮</b> ở góc trên bên phải</li><li>Chọn <b>Mở bằng trình duyệt</b> (hoặc <b>Mở trong Chrome</b>)</li><li>Hoặc bấm <b>Mở bằng Chrome</b> bên dưới</li>';
+  const chrome = `intent://${url.replace(/^https?:\/\//, '')}#Intent;scheme=https;package=com.android.chrome;end`;
+  return `<div class="inapp" role="alert">
+    <h3>Mở bằng ${ios ? 'Safari' : 'Chrome'} để đăng nhập</h3>
+    <p>Bạn đang mở link trong ${esc(where)}. Google không cho đăng nhập trong trình duyệt của ${b.name ? esc(b.name) : 'ứng dụng này'}.</p>
+    <ol>${steps}</ol>
+    <div class="inapp-actions">${ios ? '' : `<a class="btn" href="${esc(chrome)}">Mở bằng Chrome</a>`}<button type="button" class="btn ${ios ? '' : 'ghost'}" data-act="copy-link">Sao chép link</button></div>
+    <input class="inapp-url" type="text" value="${esc(url)}" readonly aria-label="Link ứng dụng">
+  </div>`;
+}
+async function copyLink() {
+  const url = appUrl();
+  let ok = false;
+  try { await navigator.clipboard.writeText(url); ok = true; } catch { /* trình duyệt nhúng thường chặn clipboard API */ }
+  if (!ok) {
+    const i = $('.inapp-url');
+    if (i) { i.focus(); i.select(); i.setSelectionRange(0, url.length); try { ok = document.execCommand('copy'); } catch { ok = false; } }
+  }
+  toast(ok ? 'Đã sao chép link – mở Chrome hoặc Safari và dán vào thanh địa chỉ' : 'Nhấn giữ vào ô link để sao chép', ok ? 'ok' : 'info');
+}
+
 function onCredential(resp) {
   S.token = resp.credential;
   try { sessionStorage.setItem('idt', S.token); } catch { /* ignore */ }
@@ -524,7 +564,7 @@ async function boot() {
   const p = saved && jwtPayload(saved);
   if (p && p.exp * 1000 - Date.now() > 120000) { S.token = saved; S.loginKind = 'restore'; return startSession(); }
   showLogin();
-  google.accounts.id.prompt();
+  if (!inAppBrowser()) google.accounts.id.prompt(); // trong Zalo/Messenger Google sẽ từ chối, không tự bật
 }
 
 function welcome() {
@@ -1568,6 +1608,7 @@ document.addEventListener('click', async (e) => {
     case 'export-tasks': return exportTasks();
     case 'export-log': return exportLog();
     case 'print': return window.print();
+    case 'copy-link': return copyLink();
     case 'mine': S.filters.unit = S.user.unit; return rerender();
     case 'new-task': return openTaskEdit(null);
     case 'new-project': return openProjectEdit(null);
