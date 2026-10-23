@@ -25,7 +25,7 @@ var USER_STATUS = ['pending', 'active', 'disabled'];
 var TASK_STATUS = ['', 'Chưa bắt đầu', 'Đang thi công', 'Tạm dừng', 'Hoàn thành'];
 var PROJECT_STATUS = ['Chuẩn bị', 'Đang thực hiện', 'Tạm dừng', 'Hoàn thành'];
 // Loại nhà thầu mặc định; admin thêm/sửa/xóa trong app (lưu ở Config › UNIT_TYPES dạng JSON)
-var DEFAULT_UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
+var DEFAULT_UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Tư vấn thiết kế', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
 var MAX_PHOTOS = 6;
 var MAX_PHOTO_B64 = 3 * 1024 * 1024;
 var MAX_IMPORT = 2000;

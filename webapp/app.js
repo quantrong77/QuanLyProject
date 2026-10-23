@@ -1808,7 +1808,7 @@ function renderLog() {
 
 /* ============================ ADMIN ============================ */
 const PROJECT_STATUS = ['Chuẩn bị', 'Đang thực hiện', 'Tạm dừng', 'Hoàn thành'];
-const UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
+const UNIT_TYPES = ['Quản lý dự án', 'Tư vấn giám sát', 'Tư vấn thiết kế', 'Thi công', 'Cung cấp thiết bị', 'Khác'];
 const ADMIN_TABS = { projects: 'Dự án', packages: 'Hạng mục chính', units: 'Nhà thầu', tasks: 'Đầu việc', users: 'Người dùng' };
 
 function renderAdmin() {
@@ -2111,7 +2111,8 @@ function openUnitEdit(code) {
     <div class="dlg-head"><h2>${code ? 'Sửa nhà thầu ' + esc(code) : 'Thêm nhà thầu'}</h2><button class="x" data-act="close" aria-label="Đóng">×</button></div>
     <form class="dlg-body" id="unitForm"><div class="form-grid">
       <label class="field"><span>Mã nhà thầu *</span><input type="text" name="code" required maxlength="30" value="${esc(u.code)}" ${code ? 'readonly' : ''} placeholder="VD: PCC1" style="text-transform:uppercase"></label>
-      <label class="field"><span>Loại</span><select name="type">${[...unitTypes(), ...(u.type && !unitTypes().includes(u.type) ? [u.type] : [])].map((t) => `<option ${t === u.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+      <label class="field"><span>Loại</span><select name="type">${[...unitTypes(), ...(u.type && !unitTypes().includes(u.type) ? [u.type] : [])].map((t) => `<option ${t === u.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__new">＋ Loại khác…</option></select></label>
+      <label class="field full" id="newTypeField" hidden><span>Tên loại mới *</span><input type="text" name="newType" maxlength="60" placeholder="VD: Tư vấn thẩm tra"><small class="muted">Loại mới được thêm vào danh mục Loại nhà thầu.</small></label>
       <label class="field full"><span>Tên đầy đủ *</span><input type="text" name="name" required maxlength="200" value="${esc(u.name)}"></label>
       <label class="field"><span>Người liên hệ / Chỉ huy trưởng</span><input type="text" name="contact" maxlength="200" value="${esc(u.contact)}"></label>
       <label class="field"><span>Điện thoại</span><input type="tel" name="phone" maxlength="50" value="${esc(u.phone)}"></label>
@@ -2124,6 +2125,12 @@ function openUnitEdit(code) {
       }).join('')}</div></div>` : ''}
     </div>${code ? '<small class="muted">Mã nhà thầu không đổi được vì đang gắn với đầu việc và người dùng.</small>' : ''}</form>
     <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="saveUnit">Lưu</button></div>`);
+  const typeSel = $('#unitForm [name=type]'), newType = $('#unitForm [name=newType]');
+  typeSel.onchange = () => {
+    const on = typeSel.value === '__new';
+    $('#newTypeField').hidden = !on; newType.required = on;
+    if (on) newType.focus();
+  };
   $('#saveUnit').onclick = async () => {
     const f = $('#unitForm');
     if (!f.reportValidity()) return;
@@ -2131,7 +2138,15 @@ function openUnitEdit(code) {
     d.isNew = !code;
     const want = new Set($$('input[name=proj]:checked:not(:disabled)', f).map((c) => c.value));
     delete d.proj;
+    delete d.newType;
     try {
+      if (d.type === '__new') {
+        // loại gõ tay: trùng loại có sẵn (không phân biệt hoa thường) thì dùng loại đó, chưa có thì thêm vào danh mục
+        const name = newType.value.trim();
+        const ex = unitTypes().find((t) => t.toLowerCase() === name.toLowerCase());
+        if (!ex) S.config.UNIT_TYPES = (await api('saveUnitType', { name })).types;
+        d.type = ex || name;
+      }
       const r = await api('saveUnit', d);
       S.units = r.units;
       // cập nhật danh sách nhà thầu tham gia của các dự án có giới hạn nhà thầu
