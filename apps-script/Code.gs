@@ -121,6 +121,7 @@ function route_(action, d, auth) {
     bulkAssignUnit: [MGR, bulkAssignUnit_, true],
     bulkUpdateTasks: [MGR, bulkUpdateTasks_, true],
     saveProject: [ADMIN, saveProject_, true],
+    copyProject: [ADMIN, copyProject_, true],
     savePackage: [MGR, savePackage_, true],
     deletePackage: [ADMIN, deletePackage_, true],
     deleteProject: [ADMIN, deleteProject_, true],
@@ -371,6 +372,53 @@ function saveProject_(user, d) {
   p.updated_at = nowIso_();
   if (isNew) appendRow_('Projects', p); else writeRow_('Projects', p);
   return { project: clean_(p) };
+}
+
+/**
+ * Sao chép dự án: tạo dự án mới (d.project) hoặc chép vào dự án có sẵn (d.target_id).
+ * d.packages: [{key, code, name, ...}] – hạng mục trùng mã ở dự án đích thì dùng lại, chưa có thì tạo mới.
+ * d.tasks: các đầu việc, trường pkg trỏ tới key của hạng mục (trống = không thuộc hạng mục).
+ * Bản sao bắt đầu từ 0%, không có ngày thực tế và nhật ký.
+ */
+function copyProject_(user, d) {
+  var pkgsIn = d.packages || [], tasksIn = d.tasks || [];
+  if (!tasksIn.length && !pkgsIn.length) throw new Error('Không có hạng mục hay đầu việc nào để sao chép');
+  if (tasksIn.length > MAX_IMPORT) throw new Error('Tối đa ' + MAX_IMPORT + ' đầu việc mỗi lần sao chép');
+  var keys = {};
+  pkgsIn.forEach(function (k) { if (!str_(k.name, 300)) throw new Error('Hạng mục chính thiếu tên'); keys[k.key] = true; });
+  // kiểm tra đầu việc trước khi tạo gì, để không sao chép dở dang
+  tasksIn.forEach(function (t, i) {
+    if (!str_(t.name)) throw new Error('Đầu việc thứ ' + (i + 1) + ' thiếu tên');
+    if (t.pkg && !keys[t.pkg]) throw new Error('Đầu việc "' + t.name + '" trỏ tới hạng mục không có trong danh sách');
+    var s = dateStr_(t.plan_start), e = dateStr_(t.plan_end);
+    if (s && e && e < s) throw new Error('Kết thúc KH phải sau bắt đầu KH: ' + t.name);
+  });
+  var p, isNew = !d.target_id;
+  if (isNew) {
+    p = saveProject_(user, d.project || {}).project;
+  } else {
+    p = readTable_('Projects').filter(function (x) { return x.id === d.target_id; })[0];
+    if (!p) throw new Error('Không tìm thấy dự án đích');
+    p = clean_(p);
+  }
+  var existing = readTable_('Packages').filter(function (k) { return k.project_id === p.id; });
+  var map = {}, pkgsOut = [];
+  pkgsIn.forEach(function (k) {
+    var code = str_(k.code, 50).toLowerCase();
+    var same = code && existing.filter(function (x) { return String(x.code).toLowerCase() === code; })[0];
+    if (same) { map[k.key] = same.id; return; }
+    var nk = savePackage_(user, { project_id: p.id, code: k.code, name: k.name, description: k.description,
+      start_date: k.start_date, end_date: k.end_date, status: k.status || 'Chuẩn bị' }).package;
+    map[k.key] = nk.id;
+    pkgsOut.push(nk);
+  });
+  var res = tasksIn.length ? importTasks_(user, { project_id: p.id, tasks: tasksIn.map(function (t) {
+    var o = {};
+    ['wbs', 'section', 'group', 'subgroup', 'name', 'phase', 'unit', 'plan_start', 'plan_end', 'plan_days', 'note'].forEach(function (f) { if (t[f] !== undefined) o[f] = t[f]; });
+    o.package_id = t.pkg ? map[t.pkg] : '';
+    return o;
+  }) }) : { tasks: [] };
+  return { project: res.project || p, isNew: isNew, packages: pkgsOut, tasks: res.tasks };
 }
 
 function deleteProject_(user, d) {

@@ -222,9 +222,10 @@ const Demo = {
     p.units = [...list, ...add].join(',');
     return p;
   },
-  call(action, d) {
+  /** Xử lý đồng bộ một hành động (gọi lồng được, ví dụ copyProject dùng lại saveProject/importTasks). */
+  run(action, d) {
     const db = this.db, me = this.me();
-    const res = (() => {
+    {
       switch (action) {
         case 'me': return { profile: { email: me.email, name: me.name, picture: '' }, user: me, config: db.config, units: db.units };
         case 'bootstrap': return { user: me, config: db.config, units: db.units, projects: db.projects, packages: db.packages, tasks: db.tasks, updates: db.updates, users: me.role === 'admin' ? db.users : undefined };
@@ -341,6 +342,22 @@ const Demo = {
           if (!p.name) throw new Error('Vui lòng nhập tên dự án');
           return { project: p };
         }
+        case 'copyProject': {
+          if (!d.tasks.length && !d.packages.length) throw new Error('Không có hạng mục hay đầu việc nào để sao chép');
+          d.tasks.forEach((t, i) => { if (!t.name) throw new Error(`Đầu việc thứ ${i + 1} thiếu tên`); });
+          const p = d.target_id ? db.projects.find((x) => x.id === d.target_id) : this.run('saveProject', d.project).project;
+          if (!p) throw new Error('Không tìm thấy dự án đích');
+          const map = {}, packages = [];
+          d.packages.forEach((k) => {
+            const same = k.code && db.packages.find((x) => x.project_id === p.id && String(x.code).toLowerCase() === k.code.toLowerCase());
+            if (same) { map[k.key] = same.id; return; }
+            const { key, ...f } = k;
+            const nk = this.run('savePackage', { ...f, project_id: p.id, status: f.status || 'Chuẩn bị' }).package;
+            map[key] = nk.id; packages.push(nk);
+          });
+          const r = d.tasks.length ? this.run('importTasks', { project_id: p.id, tasks: d.tasks.map(({ pkg, ...t }) => ({ ...t, package_id: pkg ? map[pkg] : '' })) }) : { tasks: [] };
+          return { project: r.project || p, isNew: !d.target_id, packages, tasks: r.tasks };
+        }
         case 'deleteProject': {
           const n = db.tasks.filter((t) => t.project_id === d.id).length;
           if (n && !d.cascade) throw new Error(`Dự án còn ${n} công việc. Xác nhận xóa kèm công việc.`);
@@ -384,7 +401,10 @@ const Demo = {
         case 'saveProfile': Object.assign(me, { name: d.name || me.name, phone: d.phone || '' }); return { user: me };
       }
       throw new Error('Hành động không hợp lệ');
-    })();
+    }
+  },
+  call(action, d) {
+    const res = this.run(action, d);
     this.save();
     return new Promise((r) => setTimeout(() => r(JSON.parse(JSON.stringify(res))), 120));
   },
@@ -866,7 +886,7 @@ const GUIDE = [
     </ul>` },
   { id: 'admin', title: 'Quản trị (PTC3, Tư vấn giám sát)', body: `
     <ol>
-      <li><b>Dự án</b>: tạo dự án, chọn nhà thầu tham gia.</li>
+      <li><b>Dự án</b>: tạo dự án, chọn nhà thầu tham gia. Dự án tương tự thì bấm <i>Sao chép</i> ở dự án có sẵn rồi sửa lại cho nhanh.</li>
       <li><b>Hạng mục chính</b>: thêm các hạng mục, ví dụ Thay MBA AT1, AT2.</li>
       <li><b>Đầu việc</b>: bấm <i>File mẫu</i>, điền danh sách, rồi <i>Nhập từ Excel</i>; hoặc thêm từng việc.</li>
       <li><b>Người dùng</b>: duyệt tài khoản, đổi vai trò và đơn vị, khóa tài khoản không còn dùng.</li>
@@ -1840,7 +1860,7 @@ function adminProjects() {
         <td><span class="tag">${esc(p.status)}</span></td>
         <td>${projectUnitCodes(p).map((c) => `<span class="tag unit">${esc(c)}</span>`).join(' ') || '<small class="muted">Tất cả</small>'}</td>
         <td class="num">${S.packages.filter((k) => k.project_id === p.id).length}</td><td class="num">${ts.length}</td><td class="num">${weightedPct(ts, (t) => t.progress / 100).toFixed(1)}%</td>
-        <td style="white-space:nowrap">${cur ? '' : `<button class="btn ghost sm" data-open-project="${p.id}">Mở</button> `}<button class="btn ghost sm" data-edit-project="${p.id}">Sửa</button> <button class="btn ghost sm danger-text" data-del-project="${p.id}">Xóa</button></td></tr>`;
+        <td style="white-space:nowrap">${cur ? '' : `<button class="btn ghost sm" data-open-project="${p.id}">Mở</button> `}<button class="btn ghost sm" data-edit-project="${p.id}">Sửa</button> <button class="btn ghost sm" data-copy-project="${p.id}" title="Chép hạng mục chính và đầu việc sang dự án mới hoặc dự án khác">Sao chép</button> <button class="btn ghost sm danger-text" data-del-project="${p.id}">Xóa</button></td></tr>`;
     }).join('') || '<tr><td colspan="10" class="empty">Chưa có dự án – bấm “Tạo dự án”</td></tr>'}
     </tbody></table></div>`;
 }
@@ -1880,6 +1900,106 @@ function openProjectEdit(id) {
       toast(id ? 'Đã lưu dự án' : `Đã tạo dự án ${r.project.code || r.project.name} – hãy thêm đầu việc`);
       rerender();
     } catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ---------- Sao chép dự án ---------- */
+function openCopyProject(id) {
+  const src = S.projects.find((x) => x.id === id);
+  const pkgs = S.packages.filter((k) => k.project_id === id).sort((a, b) => (+a.order || 0) - (+b.order || 0));
+  const tasks = S.tasks.filter((t) => t.project_id === id).sort((a, b) => (+a.order || 0) - (+b.order || 0));
+  const loose = tasks.filter((t) => !pkgs.some((k) => k.id === t.package_id));
+  if (!pkgs.length && !tasks.length) return toast('Dự án chưa có hạng mục chính hay đầu việc nào để sao chép', 'err');
+  const starts = [...tasks.map((t) => t.plan_start), src.start_date, ...pkgs.map((k) => k.start_date)].map(parseD).filter(Boolean);
+  const minStart = starts.length ? dayStart(new Date(Math.min(...starts))) : null;
+  const others = S.projects.filter((p) => p.id !== id);
+  const nTasks = (k) => tasks.filter((t) => t.package_id === k.id).length;
+  openDialog(`
+    <div class="dlg-head"><div><h2>Sao chép dự án</h2><small>Từ ${esc(src.code ? src.code + ' – ' : '')}${esc(src.name)}</small></div><button class="x" data-act="close" aria-label="Đóng">×</button></div>
+    <form class="dlg-body" id="cprForm">
+      <fieldset class="cp-dates"><legend>Sao chép vào</legend>
+        <label class="chk"><input type="radio" name="mode" value="new" checked> Dự án mới</label>
+        <label class="chk"><input type="radio" name="mode" value="exist" ${others.length ? '' : 'disabled'}> Dự án có sẵn ${others.length ? '' : '<small class="muted">(chưa có dự án khác)</small>'}</label>
+      </fieldset>
+      <div class="form-grid" id="cprNew">
+        <label class="field full"><span>Tên dự án mới *</span><input type="text" name="name" maxlength="300" value="${esc(src.name)} (bản sao)"></label>
+        <label class="field"><span>Mã dự án</span><input type="text" name="code" maxlength="50" placeholder="VD: NCS-XUANTHANH"></label>
+        <label class="field"><span>Địa điểm</span><input type="text" name="location" maxlength="300" value="${esc(src.location)}"></label>
+      </div>
+      <label class="field" id="cprExist" hidden><span>Dự án đích</span><select name="target">${others.map((p) => `<option value="${p.id}">${esc(p.code ? p.code + ' – ' : '')}${esc(p.name)}</option>`).join('')}</select>
+        <small class="muted">Hạng mục chính trùng mã ở dự án đích được dùng chung: đầu việc chép thêm vào hạng mục đó.</small></label>
+      <div class="field"><span>Hạng mục chính cần chép</span><div class="check-grid">
+        ${pkgs.map((k) => `<label><input type="checkbox" name="pkg" value="${k.id}" checked> <b>${esc(k.code || '')}</b> ${esc(k.name)} <small>(${nTasks(k)} việc)</small></label>`).join('')}
+        ${loose.length ? `<label><input type="checkbox" name="pkg" value="__none" checked> Đầu việc chưa thuộc hạng mục <small>(${loose.length} việc)</small></label>` : ''}
+      </div></div>
+      <fieldset class="cp-dates"><legend>Ngày kế hoạch</legend>
+        <label class="chk"><input type="radio" name="dates" value="shift" ${minStart ? 'checked' : 'disabled'}> Dời lịch: bắt đầu dự án từ ngày <input type="date" name="newStart" value="${minStart ? dstr(minStart) : ''}" ${minStart ? '' : 'disabled'}></label>
+        <label class="chk"><input type="radio" name="dates" value="keep"> Giữ nguyên ngày như dự án gốc</label>
+        <label class="chk"><input type="radio" name="dates" value="clear" ${minStart ? '' : 'checked'}> Bỏ trống, nhập sau</label>
+      </fieldset>
+      <div class="form-grid">
+        <label class="field"><span>Thay chữ trong tên hạng mục, đầu việc</span><input type="text" name="from" placeholder="VD: Di Linh"></label>
+        <label class="field"><span>thành</span><input type="text" name="to" placeholder="VD: Xuân Thành"></label>
+      </div>
+      <label class="chk"><input type="checkbox" name="keepUnit" checked> Giữ nhà thầu như dự án gốc</label>
+      <div class="note-box">Bản sao bắt đầu từ 0%, không có ngày thực tế, nhật ký và ảnh. Dự án gốc không thay đổi. Sau khi chép, sửa tiếp trong tab Hạng mục chính và Đầu việc.</div>
+      <div class="imp-sum" id="cprSum"></div>
+    </form>
+    <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="cprGo">Sao chép</button></div>`);
+  const form = $('#cprForm');
+  const build = () => {
+    const f = Object.fromEntries(new FormData(form));
+    const picked = new Set($$('input[name=pkg]:checked', form).map((c) => c.value));
+    let ms = 0;
+    if (f.dates === 'shift' && f.newStart && minStart) ms = parseD(f.newStart) - minStart;
+    const date = (v) => (f.dates === 'clear' ? '' : f.dates === 'shift' ? shiftIso(v, ms) : v || '');
+    const tx = (v) => replaceAllText(v, f.from, f.to);
+    const packages = pkgs.filter((k) => picked.has(k.id)).map((k) => ({ key: k.id, code: tx(k.code), name: tx(k.name), description: tx(k.description), start_date: date(k.start_date), end_date: date(k.end_date) }));
+    const inPkg = (t) => pkgs.some((k) => k.id === t.package_id);
+    const rows = tasks.filter((t) => picked.has(inPkg(t) ? t.package_id : '__none')).map((t) => ({
+      pkg: inPkg(t) ? t.package_id : '', wbs: t.wbs, phase: t.phase, plan_days: t.plan_days,
+      name: tx(t.name), section: tx(t.section), group: tx(t.group), subgroup: tx(t.subgroup), note: tx(t.note),
+      unit: f.keepUnit ? t.unit || '' : '', plan_start: date(t.plan_start), plan_end: date(t.plan_end),
+    }));
+    const d = { packages, tasks: rows };
+    if (f.mode === 'exist') d.target_id = f.target;
+    else {
+      d.project = { name: f.name.trim(), code: f.code.trim(), location: f.location, owner: src.owner, description: tx(src.description),
+        status: 'Chuẩn bị', start_date: date(src.start_date), end_date: date(src.end_date), units: f.keepUnit ? projectUnitCodes(src) : [] };
+    }
+    return d;
+  };
+  const refresh = () => {
+    const exist = form.mode.value === 'exist';
+    $('#cprNew').hidden = exist;
+    $('#cprExist').hidden = !exist;
+    form.elements.name.required = !exist;
+    const d = build();
+    const ds = d.tasks.flatMap((t) => [t.plan_start, t.plan_end]).filter(Boolean).sort();
+    $('#cprSum').innerHTML = `<span><b>${d.packages.length}</b> hạng mục chính</span><span><b>${d.tasks.length}</b> đầu việc</span>${ds.length ? `<span>Kế hoạch <b>${fmtDate(ds[0])} → ${fmtDate(ds[ds.length - 1])}</b></span>` : ''}`;
+    $('#cprGo').disabled = !d.packages.length && !d.tasks.length;
+  };
+  form.onchange = (e) => {
+    if (e.target.name === 'newStart') form.querySelector('input[value=shift]').checked = true;
+    refresh();
+  };
+  form.oninput = refresh;
+  refresh();
+  $('#cprGo').onclick = async () => {
+    if (!form.reportValidity()) return;
+    try {
+      const r = await api('copyProject', build());
+      const ex = S.projects.find((x) => x.id === r.project.id);
+      if (ex) Object.assign(ex, r.project); else S.projects.push(r.project);
+      S.packages.push(...r.packages);
+      r.tasks.forEach((t) => { t.progress = +t.progress || 0; S.tasks.push(t); });
+      setProject(r.project.id);
+      S.adminTab = 'packages';
+      renderProjSel();
+      closeDialog();
+      toast(`Đã sao chép ${r.tasks.length} đầu việc${r.packages.length ? `, ${r.packages.length} hạng mục chính` : ''} vào ${r.project.code || r.project.name}`, 'ok');
+      rerender();
+    } catch (e) { toast(e.message, 'err'); }
   };
 }
 
@@ -2073,7 +2193,7 @@ function openCopyTasks(ids) {
       + (rows.length > 50 ? `<tr><td colspan="6" class="empty">… và ${rows.length - 50} đầu việc khác</td></tr>` : '');
   };
   form.onchange = (e) => {
-    if (e.target.name === 'target' && !toTouched) form.to.value = pkgById(form.target.value)?.code || '';
+    if (e.target.name === 'target' && !toTouched) form.to.value = pkgById(form.elements.target.value)?.code || '';
     if (e.target.name === 'newStart') form.querySelector('input[value=shift]').checked = true;
     preview();
   };
@@ -2376,7 +2496,7 @@ function exportLog() {
 
 /* ============================ EVENTS ============================ */
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks],[data-fv],[data-sort],[data-copy-pkg]');
+  const el = e.target.closest('[data-act],[data-view],[data-go],[data-task],[data-photos],[data-edit-task],[data-del-task],[data-atab],[data-approve],[data-zoom],[data-open-project],[data-edit-project],[data-del-project],[data-edit-unit],[data-del-unit],[data-pkg],[data-edit-pkg],[data-del-pkg],[data-pkg-tasks],[data-fv],[data-sort],[data-copy-pkg],[data-copy-project]');
   if (!el) {
     if (!e.target.closest('#userMenu,#userChip')) $('#userMenu').hidden = true;
     return;
@@ -2392,6 +2512,7 @@ document.addEventListener('click', async (e) => {
   if (ds.editProject) return openProjectEdit(ds.editProject);
   if (ds.delProject) return deleteProject(ds.delProject);
   if (ds.editUnit) return openUnitEdit(ds.editUnit);
+  if (ds.copyProject) return openCopyProject(ds.copyProject);
   if (ds.copyPkg) return openCopyTasks(S.tasks.filter((t) => t.package_id === ds.copyPkg).map((t) => t.id));
   if (ds.fv) return setFv({ mode: ds.fv });
   if (ds.sort) return setFv(S.fv.sort === ds.sort ? { dir: S.fv.dir === 'asc' ? 'desc' : 'asc' } : { sort: ds.sort, dir: ds.sort === 'modified' ? 'desc' : 'asc' });
