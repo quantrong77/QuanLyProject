@@ -547,6 +547,7 @@ function importTasks_(user, d) {
 /**
  * Nhập lại file Excel xuất từ app: dòng có id -> cập nhật các ô được gửi lên; dòng không có id -> thêm mới.
  * Đổi % hoàn thành / ngày thực tế / trạng thái thì ghi thêm một dòng nhật ký "Cập nhật từ file Excel".
+ * d.delete_ids: đầu việc cần xóa (nhập file timeline ở chế độ thay thế).
  * Kiểm tra toàn bộ trước, chỉ ghi khi không có dòng lỗi.
  */
 function syncTasks_(user, d) {
@@ -559,6 +560,12 @@ function syncTasks_(user, d) {
   var n = Number(nextId_('T', tasks).slice(1)), order = maxOrder_(tasks, d.project_id);
   var now = nowIso_(), today = now.slice(0, 10), stamp = new Date().getTime().toString(36);
   var created = [], changed = [], ups = [];
+  var dels = (d.delete_ids || []).map(function (id) {
+    var t = byId[id];
+    if (!t || t.project_id !== d.project_id) throw new Error('Đầu việc cần xóa ' + id + ' không thuộc dự án này');
+    if (rows.some(function (r) { return r.id === id; })) throw new Error('Đầu việc ' + id + ' vừa cập nhật vừa xóa');
+    return t;
+  });
   rows.forEach(function (r, i) {
     try {
       var t;
@@ -599,9 +606,11 @@ function syncTasks_(user, d) {
   });
   writeRows_('Tasks', changed);
   appendRows_('Tasks', created);
+  deleteRows_('Tasks', dels); // sau cùng: dòng mới nằm cuối sheet nên vị trí các dòng cần xóa không đổi
   appendRows_('Updates', ups);
   var proj = linkUnits_(d.project_id, created.concat(changed).map(function (t) { return t.unit; }));
-  return { created: created.map(clean_), changed: changed.map(clean_), updates: ups, project: proj };
+  return { created: created.map(clean_), changed: changed.map(clean_), updates: ups, project: proj,
+    deleted: dels.map(function (t) { return t.id; }) };
 }
 
 /** Dự án có danh sách nhà thầu tham gia: tự thêm các nhà thầu vừa được gán. Trả về dự án nếu có thay đổi. */

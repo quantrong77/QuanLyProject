@@ -588,3 +588,8 @@ dialog.wide { width: min(1240px, calc(100vw - 24px)); }
   .table-wrap { overflow: visible; border: 0; }
   th { position: static; }
 }
+/* Xem trước file timeline: tiêu đề phần / nhóm / nhóm con */
+.tl-tree tr.tl-h td { font-weight: 600; background: var(--surface-2); }
+.tl-tree tr.tl-l1 td { color: var(--brand-2); }
+.tl-tree tr.tl-l2 td { font-weight: 600; }
+.tl-tree tr.tl-l3 td { font-weight: 500; background: transparent; }
