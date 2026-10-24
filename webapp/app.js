@@ -891,7 +891,7 @@ const GUIDE = [
     <ol>
       <li><b>Dự án</b>: tạo dự án, chọn nhà thầu tham gia. Dự án tương tự thì bấm <i>Sao chép</i> ở dự án có sẵn rồi sửa lại cho nhanh.</li>
       <li><b>Hạng mục chính</b>: thêm các hạng mục, ví dụ Thay MBA AT1, AT2.</li>
-      <li><b>Đầu việc</b>: bấm <i>File mẫu</i>, điền danh sách, rồi <i>Nhập từ Excel</i>; hoặc thêm từng việc. File tiến độ timeline (cột STT đánh mục A, I, 1, a) nhập thẳng được bằng <i>Nhập từ Excel</i>.</li>
+      <li><b>Đầu việc</b>: bấm <i>File mẫu</i>, điền danh sách, rồi <i>Nhập từ Excel</i>; hoặc thêm từng việc. File tiến độ timeline (cột STT đánh mục A, I, 1, a) nhập thẳng được bằng <i>Nhập từ Excel</i>. Bấm <i>Xuất dạng timeline</i> để lấy file theo mẫu này, điền % hoàn thành, ngày thực tế rồi nhập lại.</li>
       <li><b>Người dùng</b>: duyệt tài khoản, đổi vai trò và đơn vị, khóa tài khoản không còn dùng.</li>
     </ol>` },
   { id: 'faq', title: 'Gặp sự cố', body: `
@@ -1301,6 +1301,7 @@ function renderDashboard() {
   $('#main').innerHTML = `
   <div class="toolbar"><h2>Tổng quan tiến độ</h2>
     <button class="btn ghost sm no-print" data-act="export-tasks">⬇ Xuất Excel</button>
+    <button class="btn ghost sm no-print" data-act="export-timeline" title="File tiến độ dạng STT A › I › 1 › a – điền % và ngày thực tế rồi Nhập từ Excel">⬇ Xuất dạng timeline</button>
     <button class="btn ghost sm no-print" data-act="sync">⟳ Đồng bộ</button></div>
   ${filterBar({ cls: false })}
   <div class="kpis">
@@ -2311,6 +2312,7 @@ function adminTasks() {
       <button class="btn sm" data-act="new-task">＋ Thêm đầu việc</button>
       <button class="btn ghost sm" data-act="import-tasks">⬆ Nhập từ Excel</button>
       <button class="btn ghost sm" data-act="tpl-tasks">⬇ File mẫu</button>
+      <button class="btn ghost sm" data-act="export-timeline" title="Xuất hạng mục chính đang chọn theo dạng timeline để nhập tay rồi nhập lại">⬇ Xuất dạng timeline</button>
       <span style="flex:1"></span>
       <small class="muted" id="selCount">0 đã chọn</small>
       <select id="bulkUnit" style="width:auto">${unitSelectOptions('', '(Bỏ gán nhà thầu)')}</select>
@@ -2386,17 +2388,18 @@ const sameVal = (k, a, b) => {
 };
 async function importTasksFile(file) {
   if (!window.XLSX) return toast('Thư viện Excel chưa tải xong', true);
-  let rows, aoa;
+  let rows, aoa, txt;
   try {
     const buf = await file.arrayBuffer();
     const raw = XLSX.read(buf);
     aoa = XLSX.utils.sheet_to_json(raw.Sheets[raw.SheetNames[0]], { header: 1, defval: '', raw: true });
+    txt = XLSX.utils.sheet_to_json(raw.Sheets[raw.SheetNames[0]], { header: 1, defval: '', raw: false });
     const wb = XLSX.read(buf, { cellDates: true });
     rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
   } catch { return toast('Không đọc được file Excel', true); }
   // file tiến độ dạng timeline (STT, Nội dung công việc, Pha, Ngày bắt đầu/kết thúc KH)
   const hdr = timelineHeader(aoa);
-  if (hdr >= 0) return importTimelineFile(file, aoa, hdr);
+  if (hdr >= 0) return importTimelineFile(file, aoa, hdr, txt);
   const p = curProject();
   const ctx = {
     codes: new Map(S.units.map((u) => [u.code.toUpperCase(), u.code])),
@@ -2497,10 +2500,15 @@ function tlLevel(stt, cur) {
   return 0;
 }
 /** Đọc file timeline thành danh sách đầu việc (dòng không có dòng con) theo đúng thứ tự trong file. */
-function parseTimeline(aoa, hdr) {
+function parseTimeline(aoa, hdr, txt = aoa) {
   const H = aoa[hdr].map((c) => String(c).trim().toLowerCase());
-  const col = (re) => H.findIndex((h) => re.test(h));
-  const C = { stt: col(/^stt$/), name: col(/nội dung/), phase: col(/^pha$/), start: col(/bắt đầu/), end: col(/kết thúc/), note: col(/ghi chú/) };
+  const col = (re, no) => H.findIndex((h) => re.test(h) && !(no && no.test(h)));
+  const TT = /\btt\b|thực tế/;
+  const C = { stt: col(/^stt$/), name: col(/nội dung/), phase: col(/^pha$/), start: col(/bắt đầu/, TT), end: col(/kết thúc/, TT), note: col(/ghi chú/),
+    // các cột nhập tay có trong file xuất từ app
+    unit: col(/^(nhà thầu|đơn vị)$/), progress: col(/%/), aStart: col(/bắt đầu (tt|thực tế)/), aEnd: col(/(hoàn thành|kết thúc) (tt|thực tế)/),
+    status: col(/^trạng thái/), id: col(/^mã đv$/) };
+  const errs = [];
   const codes = new Map(S.units.map((u) => [u.code.toUpperCase(), u.code]));
   const unknown = new Set(), skipped = [];
   const clean = (v) => {
@@ -2530,8 +2538,38 @@ function parseTimeline(aoa, hdr) {
     if (!lv) { skipped.push(`Dòng ${r + 1}: STT "${stt}" không theo thứ tự A, I, 1, a`); continue; }
     cur[lv] = stt;
     for (let k = lv + 1; k <= 4; k++) cur[k] = '';
-    items.push({ line: r + 1, lv, stt, wbs: cur.slice(1, lv + 1).filter(Boolean).join('.'), name, phase: clean(g(C.phase)),
-      start: xlDate(g(C.start)), end: xlDate(g(C.end)), note: [pending, note].filter(Boolean).join(' – '), unit: unitOf(name) });
+    const it = { line: r + 1, lv, stt, wbs: cur.slice(1, lv + 1).filter(Boolean).join('.'), name, phase: clean(g(C.phase)),
+      start: xlDate(g(C.start)), end: xlDate(g(C.end)), note: [pending, note].filter(Boolean).join(' – '), unit: unitOf(name) };
+    // cột nhập tay (file xuất từ app): chỉ đọc khi file có cột đó
+    const extra = {};
+    try {
+      if (C.id >= 0 && g(C.id) !== '') extra.id = String(g(C.id)).trim();
+      if (C.unit >= 0) {
+        const u = clean(g(C.unit)).toUpperCase(), code = TL_RENAME[u] || u;
+        if (u && !codes.has(code)) throw new Error(`nhà thầu "${u}" chưa có trong danh mục`);
+        extra.unit = u ? codes.get(code) : '';
+      }
+      if (C.progress >= 0 && String(g(C.progress)).trim() !== '') {
+        const tv = String(txt[r]?.[C.progress] ?? '').trim(), raw = g(C.progress);
+        // ô định dạng % trong Excel lưu 0,6 cho 60%
+        const v = /%$/.test(tv) ? +tv.replace('%', '').replace(',', '.') : typeof raw === 'number' ? raw : +String(raw).replace(',', '.');
+        if (isNaN(v) || v < 0 || v > 100) throw new Error(`% hoàn thành "${tv || raw}" phải từ 0 đến 100`);
+        extra.progress = Math.round(v * 100) / 100;
+      }
+      ['aStart', 'aEnd'].forEach((k) => {
+        if (C[k] < 0) return;
+        const v = g(C[k]), d = xlDate(v);
+        if (v !== '' && !d) throw new Error(`ngày thực tế "${v}" không hợp lệ`);
+        extra[k === 'aStart' ? 'actual_start' : 'actual_end'] = d;
+      });
+      if (C.status >= 0) {
+        const st = clean(g(C.status));
+        if (st && !TASK_STATUS.includes(st)) throw new Error(`trạng thái "${st}" không hợp lệ (${TASK_STATUS.join(', ')})`);
+        extra.status = st;
+      }
+    } catch (e) { errs.push(`Dòng ${r + 1}: ${e.message}`); }
+    it.extra = extra;
+    items.push(it);
     pending = '';
   }
   // lượt 2: dòng có dòng con là tiêu đề (phần / nhóm / nhóm con), còn lại là đầu việc
@@ -2553,22 +2591,26 @@ function parseTimeline(aoa, hdr) {
     const days = it.start && it.end ? Math.max(0, Math.round((parseD(it.end) - parseD(it.start)) / DAY * 100) / 100) : '';
     Object.assign(t, { wbs: it.wbs, name: it.name, phase: it.phase, plan_start: it.start, plan_end: it.end, plan_days: days,
       unit: it.unit || [3, 2, 1].map((k) => (k < lv ? headUnit[k] : '')).find(Boolean) || '',
-      note: [carry, it.note].filter(Boolean).join(' – '), _line: it.line, _lv: lv });
+      note: [carry, it.note].filter(Boolean).join(' – '), _line: it.line, _lv: lv }, it.extra);
     carry = '';
     tasks.push(t);
     tree.push({ head: false, lv, task: t });
   });
-  return { tasks, tree, skipped, unknown: [...unknown], sections: items.filter((x) => x.lv === 1).length };
+  // dòng "Hạng mục chính: AT1" phía trên tiêu đề (file xuất từ app) -> chọn sẵn hạng mục
+  const pkgHint = aoa.slice(0, hdr).flat().map((c) => String(c).match(/Hạng mục chính:\s*([^\s·]+)/)?.[1]).find(Boolean) || '';
+  return { tasks, tree, skipped, errs, pkgHint, unknown: C.unit >= 0 ? [] : [...unknown], sections: items.filter((x) => x.lv === 1).length };
 }
 
-async function importTimelineFile(file, aoa, hdr) {
+async function importTimelineFile(file, aoa, hdr, txt) {
   const p = curProject();
-  const tl = parseTimeline(aoa, hdr);
+  const tl = parseTimeline(aoa, hdr, txt);
   if (!tl.tasks.length) return toast('Không tìm thấy đầu việc nào trong file (cột STT theo thứ tự A, I, 1, a)', 'err');
   const pkgs = projPackages();
-  let pkgId = (S.filters.pkg && S.filters.pkg !== '__none' && S.filters.pkg) || pkgs[0]?.id || '';
+  const hinted = tl.pkgHint && pkgs.find((k) => String(k.code || k.name).toLowerCase() === tl.pkgHint.toLowerCase());
+  let pkgId = hinted?.id || (S.filters.pkg && S.filters.pkg !== '__none' && S.filters.pkg) || pkgs[0]?.id || '';
   let mode = 'update';
   const TL_FIELDS = ['wbs', 'section', 'group', 'subgroup', 'name', 'phase', 'unit', 'plan_start', 'plan_end', 'plan_days', 'note'];
+  const PROG_FIELDS = ['progress', 'actual_start', 'actual_end', 'status'];
   const ds = tl.tasks.flatMap((t) => [t.plan_start, t.plan_end]).filter(Boolean).sort();
   // tên rút gọn để khớp đầu việc cũ khác mã STT: bỏ phần trong ngoặc, thời lượng "24 giờ", dấu câu
   const nameKey = (s) => String(s || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/\d+([,.]\d+)?\s*(giờ|ngày)/g, ' ')
@@ -2584,13 +2626,19 @@ async function importTimelineFile(file, aoa, hdr) {
     const byWbs = index((t) => `${t.wbs}|${t.phase}`), byName = index((t) => `${nameKey(t.name)}|${t.phase}`);
     const used = new Set();
     const take = (m, k) => { const list = m.get(k) || [], ex = list.find((x) => !used.has(x.id)); if (ex) used.add(ex.id); return ex; };
-    const hit = tl.tasks.map((t) => take(byWbs, `${t.wbs}|${t.phase}`));
+    const byId = index((t) => t.id);
+    const hit = tl.tasks.map((t) => (t.id ? take(byId, t.id) : undefined));
+    tl.tasks.forEach((t, i) => { if (!hit[i]) hit[i] = take(byWbs, `${t.wbs}|${t.phase}`); });
     tl.tasks.forEach((t, i) => { if (!hit[i]) hit[i] = take(byName, `${nameKey(t.name)}|${t.phase}`); });
     const base = Math.max(0, ...S.tasks.filter((t) => t.project_id === p.id).map((t) => +t.order || 0)) + 1;
     const rows = tl.tasks.map((t, i) => {
       const ex = hit[i], order = base + i;
-      if (!ex) return { kind: 'add', t, row: { ...t, package_id: pkgId, order } };
-      const diff = TL_FIELDS.filter((k) => !sameVal(k, t[k], ex[k]));
+      if (!ex) {
+        const { id, ...nt } = t; // mã của dự án/hạng mục khác: tạo đầu việc mới
+        PROG_FIELDS.forEach((k) => { if (nt[k] === '' || (k === 'progress' && !+nt[k])) delete nt[k]; });
+        return { kind: 'add', t, row: { ...nt, package_id: pkgId, order } };
+      }
+      const diff = [...TL_FIELDS, ...PROG_FIELDS.filter((k) => t[k] !== undefined)].filter((k) => !sameVal(k, t[k], ex[k]));
       return { kind: diff.length ? 'edit' : 'same', t, ex, diff, row: { id: ex.id, ...Object.fromEntries(diff.map((k) => [k, t[k]])), order, _line: t._line } };
     });
     const dels = mode === 'replace' ? exist.filter((t) => !used.has(t.id)) : [];
@@ -2609,6 +2657,8 @@ async function importTimelineFile(file, aoa, hdr) {
       ${pl.dels.length ? `<div class="note-box" style="color:var(--late)">Sẽ xóa ${pl.dels.length} đầu việc hiện có không còn trong file${logged ? `, trong đó <b>${logged}</b> đầu việc đã có tiến độ/nhật ký` : ''}. Nhật ký và ảnh vẫn giữ trong Google Sheet.</div>` : ''}
       ${tl.unknown.length ? `<div class="note-box">Mã trong ngoặc chưa có trong danh mục nhà thầu: <b>${tl.unknown.map(esc).join(', ')}</b> – các đầu việc này để trống nhà thầu. Thêm nhà thầu trong Quản trị › Nhà thầu rồi nhập lại để gán tự động.</div>` : ''}
       ${tl.skipped.length ? `<div class="note-box">${tl.skipped.slice(0, 10).map(esc).join('<br>')}</div>` : ''}
+      ${tl.errs.length ? `<div class="note-box" style="color:var(--late)">${tl.errs.slice(0, 30).map(esc).join('<br>')}${tl.errs.length > 30 ? '<br>…' : ''}</div><small class="muted">Sửa file rồi nhập lại – chỉ áp dụng khi không còn dòng lỗi.</small>` : ''}
+      ${pl.rows.some((r) => r.kind === 'edit' && r.diff.some((k) => PROG_FIELDS.includes(k))) ? '<div class="note-box">Thay đổi % hoàn thành, ngày thực tế hoặc trạng thái sẽ được ghi vào Nhật ký với nội dung “Cập nhật từ file Excel”.</div>' : ''}
       <div class="table-wrap" style="max-height:44vh"><table class="tl-tree"><thead><tr><th>STT</th><th>Nội dung công việc</th><th>Pha</th><th>Nhà thầu</th><th>Bắt đầu KH</th><th>Kết thúc KH</th><th></th></tr></thead><tbody>
         ${tl.tree.slice(0, 400).map((x) => (x.head
     ? `<tr class="tl-h tl-l${x.lv}"><td>${esc(x.wbs)}</td><td colspan="3" style="padding-left:${(x.lv - 1) * 14 + 8}px">${esc(x.name)}</td><td>${fmtD(x.start)}</td><td>${fmtD(x.end)}</td><td></td></tr>`
@@ -2616,7 +2666,7 @@ async function importTimelineFile(file, aoa, hdr) {
         ${tl.tree.length > 400 ? `<tr><td colspan="7" class="empty">… và ${tl.tree.length - 400} dòng khác</td></tr>` : ''}
       </tbody></table></div>`;
     const go = $('#tlGo'), total = n('add') + n('edit') + pl.dels.length;
-    go.disabled = !total && !pl.rows.length;
+    go.disabled = tl.errs.length > 0 || (!total && !pl.rows.length);
     go.textContent = total ? `Áp dụng ${total} thay đổi` : 'Sắp xếp lại theo file';
     return pl;
   };
@@ -2626,12 +2676,12 @@ async function importTimelineFile(file, aoa, hdr) {
       <div class="form-grid">
         <label class="field"><span>Nhập vào hạng mục chính</span><select id="tlPkg">${pkgOptions(pkgId, '(Không thuộc hạng mục chính)')}</select></label>
         <fieldset class="cp-dates"><legend>Cách nhập</legend>
-          <label class="chk"><input type="radio" name="tlMode" value="update" checked> Cập nhật đầu việc trùng STT + pha, thêm việc mới, giữ việc khác</label>
+          <label class="chk"><input type="radio" name="tlMode" value="update" checked> Cập nhật đầu việc khớp, thêm việc mới, giữ việc khác</label>
           <label class="chk"><input type="radio" name="tlMode" value="replace"> Thay thế toàn bộ: xóa đầu việc của hạng mục không còn trong file</label>
         </fieldset>
       </div>
       <div id="tlBody"></div>
-      <small class="muted">Đầu việc khớp giữ nguyên % hoàn thành, ngày thực tế và nhật ký; chỉ cập nhật tên, phân cấp, pha, nhà thầu, ngày kế hoạch, ghi chú.</small>
+      <small class="muted">Đầu việc được khớp theo Mã ĐV, rồi STT + pha, rồi tên + pha. % hoàn thành, ngày thực tế, trạng thái chỉ thay đổi khi file có các cột đó (file “Xuất dạng timeline”); nhật ký cũ luôn được giữ.</small>
     </div>
     <div class="dlg-foot"><button class="btn ghost" data-act="close">Hủy</button><button class="btn" id="tlGo">Áp dụng</button></div>`);
   $('#tlPkg').onchange = (e) => { pkgId = e.target.value; render(); };
@@ -2648,6 +2698,7 @@ async function importTimelineFile(file, aoa, hdr) {
       r.changed.forEach((t) => { const ex = taskById(t.id); if (ex) Object.assign(ex, t, { progress: +t.progress || 0 }); });
       r.created.forEach((t) => { t.progress = +t.progress || 0; S.tasks.push(t); });
       S.tasks.sort((a, b) => (+a.order || 0) - (+b.order || 0));
+      S.updates.push(...(r.updates || []));
       mergeProjects(r);
       closeDialog();
       toast(`Đã nhập tiến độ: ${r.created.length} thêm mới, ${pl.rows.filter((x) => x.kind === 'edit').length} cập nhật${gone.size ? `, ${gone.size} xóa` : ''}`, 'ok');
@@ -2688,6 +2739,68 @@ function exportTasks() {
       'Ghi chú': t.note, 'Cập nhật bởi': t.updated_by, 'Cập nhật lúc': t.updated_at,
     })),
   });
+}
+/** Xuất một hạng mục chính theo dạng file timeline (STT A › I › 1 › a) – nhập tay % / ngày thực tế rồi nhập lại. */
+const TL_COLS = ['STT', 'NỘI DUNG CÔNG VIỆC', 'Pha', 'Thời gian KH (giờ)', 'Ngày bắt đầu KH', 'Ngày kết thúc KH', 'Ghi chú',
+  'Nhà thầu', '% hoàn thành', 'Bắt đầu TT', 'Hoàn thành TT', 'Trạng thái', 'Mã ĐV'];
+function exportTimeline() {
+  if (!window.XLSX) return toast('Thư viện Excel chưa tải xong', true);
+  const p = curProject(), all = projTasks();
+  const withTasks = projPackages().filter((k) => all.some((t) => t.package_id === k.id));
+  let pkgId = S.filters.pkg || '';
+  if (!pkgId) pkgId = withTasks[0]?.id || (all.some((t) => !t.package_id) ? '__none' : '');
+  const k = pkgById(pkgId);
+  const tasks = all.filter((t) => (pkgId === '__none' ? !pkgById(t.package_id) : t.package_id === pkgId));
+  if (!tasks.length) return toast('Hạng mục chính này chưa có đầu việc để xuất', 'err');
+  // số serial ngày Excel tính theo giờ địa phương (tránh lệch vài chục giây khi thư viện tự đổi Date)
+  const xd = (v) => { const d = parseD(v); return d ? (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()) - Date.UTC(1899, 11, 30)) / DAY : ''; };
+  const aoa = [
+    [`TIẾN ĐỘ ${k ? k.name.toUpperCase() : 'ĐẦU VIỆC'} – ${p.name.toUpperCase()}`],
+    [`Hạng mục chính: ${k ? k.code || k.name : '(không thuộc hạng mục)'} · Xuất ngày ${fmtDate(today())} · Điền % hoàn thành, ngày thực tế rồi bấm Nhập từ Excel trong app. Giữ nguyên cột STT, Pha và Mã ĐV.`],
+    TL_COLS,
+  ];
+  // đánh STT lại theo cấp: phần A, B… (bỏ I) › nhóm I, II… › nhóm con 1, 2… › mục a, b…
+  const L1 = 'ABCDEFGHJKLMNOPQRSTUVWXYZ', ROMAN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX', 'XX'];
+  const sttOf = (lv, n) => (lv === 1 ? L1[n - 1] || `Z${n}` : lv === 2 ? ROMAN[n] || String(n) : lv === 3 ? String(n) : String.fromCharCode(96 + Math.min(n, 26)).repeat(Math.ceil(n / 26)));
+  const strip = (s) => String(s || '').replace(/^\s*[A-Za-z0-9]{1,6}\.\s+/, ''); // bỏ STT cũ ở đầu tiêu đề
+  const cnt = [0, 0, 0, 0, 0], heads = [];
+  let lastLeaf = '';
+  const bump = (lv) => { cnt[lv]++; for (let k = lv + 1; k <= 4; k++) cnt[k] = 0; lastLeaf = ''; return sttOf(lv, cnt[lv]); };
+  // dải ngày của tiêu đề = từ việc sớm nhất đến việc muộn nhất bên dưới
+  const span = (key) => {
+    const sub = tasks.filter((t) => [t.section, t.group, t.subgroup].filter(Boolean).join('\u0001').startsWith(key));
+    const ss = sub.map((t) => t.plan_start).filter(Boolean).sort(), es = sub.map((t) => t.plan_end).filter(Boolean).sort();
+    return [ss[0] || '', es[es.length - 1] || ''];
+  };
+  tasks.forEach((t) => {
+    const titles = [t.section, t.group, t.subgroup].filter(Boolean).slice(0, 3);
+    let i = 0;
+    while (i < titles.length && heads[i] === titles[i]) i++;
+    if (i < titles.length || heads.length > titles.length) {
+      heads.length = i;
+      for (; i < titles.length; i++) {
+        heads.push(titles[i]);
+        const [a, b] = span(heads.join('\u0001'));
+        aoa.push([bump(i + 1), strip(titles[i]), '', '', xd(a), xd(b), '', '', '', '', '', '', '']);
+      }
+    }
+    const lv = titles.length + 1, key = `${t.wbs || t.id}`;
+    // các dòng cùng mục, khác pha (VD A.I pha A, B, C) dùng chung một STT
+    const stt = key === lastLeaf ? sttOf(lv, cnt[lv]) : bump(lv);
+    lastLeaf = key;
+    aoa.push([stt, t.name, t.phase, t.plan_days ? Math.round(+t.plan_days * 24 * 100) / 100 : '', xd(t.plan_start), xd(t.plan_end), t.note,
+      t.unit, +t.progress || 0, xd(t.actual_start), xd(t.actual_end), t.status, t.id]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let r = 3; r < aoa.length; r++) {
+    [4, 5, 9, 10].forEach((c) => { const cell = ws[XLSX.utils.encode_cell({ r, c })]; if (cell && cell.t === 'n') cell.z = 'dd/mm/yyyy hh:mm'; });
+  }
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 12 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 12 } }];
+  ws['!cols'] = [6, 60, 8, 10, 16, 16, 30, 10, 11, 16, 16, 14, 8].map((w) => ({ wch: w }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Tien do');
+  XLSX.writeFile(wb, `Timeline_${fileTag()}_${k ? String(k.code || k.id).replace(/[^\w-]+/g, '_') : 'Khac'}_${today()}.xlsx`);
+  if (!S.filters.pkg && withTasks.length > 1) toast(`Đã xuất ${k.code || k.name}. Muốn xuất hạng mục khác, chọn ở bộ lọc Hạng mục chính rồi bấm lại.`);
 }
 function exportLog() {
   exportXlsx(`NhatKy_${fileTag()}_${today()}.xlsx`, {
@@ -2740,6 +2853,7 @@ document.addEventListener('click', async (e) => {
     case 'refresh':
     case 'sync': return sync(true);
     case 'export-tasks': return exportTasks();
+    case 'export-timeline': return exportTimeline();
     case 'export-log': return exportLog();
     case 'print': return window.print();
     case 'copy-link': return copyLink();
