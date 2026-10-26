@@ -47,6 +47,14 @@ function fmtTs(s) {
   return d ? `${pad(d.getHours())}:${pad(d.getMinutes())} · ${pad(d.getDate())}/${pad(d.getMonth() + 1)}` : '';
 }
 const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const HOUR = 36e5;
+// Thời lượng chi tiết đến giờ: "2 ngày 5 giờ", "3 giờ 20 phút", "45 phút"
+function fmtDur(ms) {
+  const m = Math.max(0, Math.round(ms / 6e4)), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mi = m % 60;
+  if (d) return `${d} ngày${h ? ` ${h} giờ` : ''}`;
+  if (h) return `${h} giờ${mi ? ` ${mi} phút` : ''}`;
+  return `${mi} phút`;
+}
 
 /* ============================ DOMAIN ============================ */
 function planEnd(t) {
@@ -1018,7 +1026,7 @@ function buildReport(opt) {
     all.forEach((t) => { const k = keyFn(t); if (!m.has(k)) m.set(k, []); m.get(k).push(t); });
     return [...m].map(([k, list]) => ({ label: labelFn(k), ...sum(list) }));
   };
-  const late = all.filter((t) => cls(t) === 'late').map((t) => ({ t, over: planEnd(t) && cutD > planEnd(t) ? Math.ceil((cutD - planEnd(t)) / DAY) : 0 })).sort((a, b) => b.over - a.over);
+  const late = all.filter((t) => cls(t) === 'late').map((t) => ({ t, over: planEnd(t) && cutD > planEnd(t) ? cutD - planEnd(t) : 0 })).sort((a, b) => b.over - a.over);
   const from = opt.logDays > 0 ? dtstr(new Date(cutD.getTime() - opt.logDays * DAY)) : null;
   const ids = new Set(all.map((t) => t.id));
   const log = from ? S.updates.filter((u) => ids.has(u.task_id) && effTime(u) > from && effTime(u) <= cut).sort((a, b) => (effTime(a) < effTime(b) ? -1 : 1)) : [];
@@ -1051,9 +1059,9 @@ function reportSections(R) {
 const GROUP_HEAD = ['Hạng mục', 'Số việc', 'KH đến kỳ', 'Thực tế', 'Chênh lệch', 'Hoàn thành', 'Chậm'];
 const groupRow = (g) => [g.label, g.n, pct(g.plan), pct(g.actual), dev(g), g.c.done, g.c.late];
 const LATE_HEAD = ['WBS', 'Pha', 'Đầu việc', 'Nhà thầu', 'KT kế hoạch', '% TT', 'Quá hạn', 'Ghi chú gần nhất'];
-const lateRow = ({ t, over }) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_end), `${t.progress}%`, over ? `${over} ngày` : 'Chưa triển khai', t.lastNote];
+const lateRow = ({ t, over }) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_end), `${t.progress}%`, over ? fmtDur(over) : 'Chưa triển khai', t.lastNote];
 const DETAIL_HEAD = ['WBS', 'Pha', 'Đầu việc', 'Nhà thầu', 'BĐ KH', 'KT KH', 'BĐ TT', 'KT TT', '%', 'Tình trạng'];
-const detailRow = (t, cutD) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_start), fmtD(t.plan_end), fmtD(t.actual_start, false), fmtD(t.actual_end, false), `${t.progress}%`, CLS[klass(t, cutD)].label];
+const detailRow = (t, cutD) => [t.wbs, t.phase, t.name, t.unit || '—', fmtD(t.plan_start), fmtD(t.plan_end), fmtD(t.actual_start), fmtD(t.actual_end), `${t.progress}%`, CLS[klass(t, cutD)].label];
 const LOG_HEAD = ['Thời điểm', 'Đầu việc', 'Đơn vị', 'Người cập nhật', '%', 'Nội dung'];
 const logRow = (u) => { const t = taskById(u.task_id); return [fmtTs(u.ts), t ? `${taskLabel(t)} ${t.name}` : u.task_id, u.unit || t?.unit || '', u.user_name || u.email, u.progress === '' || u.progress == null ? '' : `${u.progress}%`, u.note]; };
 function detailGroups(R) {
@@ -1284,7 +1292,7 @@ function renderDashboard() {
   const dev = actualPlanned - planned;
   const todayUps = S.updates.filter((u) => u.report_date === today() && ts.some((t) => t.id === u.task_id));
   const late = ts.filter((t) => klass(t, now) === 'late')
-    .map((t) => ({ t, over: planEnd(t) && now > planEnd(t) ? Math.ceil((now - planEnd(t)) / DAY) : 0 }))
+    .map((t) => ({ t, over: planEnd(t) && now > planEnd(t) ? now - planEnd(t) : 0 }))
     .sort((a, b) => b.over - a.over);
   const t0 = dayStart(now), t1 = new Date(t0.getTime() + 2 * DAY);
   const upcoming = ts.filter((t) => { const s = parseD(t.plan_start), e = planEnd(t); return s && s < t1 && e > t0 && t.progress < 100; })
@@ -1315,7 +1323,8 @@ function renderDashboard() {
   </div>
   ${packageCards(now)}
   <div class="grid g-21">
-    <div class="card"><div class="card-head"><h3>Đường cong S – Kế hoạch & thực tế lũy kế</h3><small>% khối lượng gia quyền theo số ngày</small></div><div class="chart-box tall"><canvas id="chS"></canvas></div></div>
+    <div class="card"><div class="card-head"><h3>Đường cong S – Kế hoạch & thực tế lũy kế</h3><small>${S.sHourly ? 'Theo giờ · 3 ngày trước → 4 ngày sau hôm nay' : '% khối lượng gia quyền theo số ngày'}</small>
+      <div class="quick no-print" style="flex:none;flex-wrap:nowrap;margin-left:auto"><button type="button" data-smode="day" class="${S.sHourly ? '' : 'on'}">Ngày</button><button type="button" data-smode="hour" class="${S.sHourly ? 'on' : ''}">Giờ</button></div></div><div class="chart-box tall"><canvas id="chS"></canvas></div></div>
     <div class="card"><div class="card-head"><h3>Tình trạng công việc</h3></div><div class="chart-box tall"><canvas id="chStatus"></canvas></div></div>
   </div>
   <div class="grid g-11">
@@ -1327,7 +1336,7 @@ function renderDashboard() {
       <div class="legend" style="margin-top:12px"><span><i style="background:var(--plan)"></i>Kế hoạch đến nay</span><span><i style="background:var(--doing)"></i>Thực tế</span></div></div>
     <div class="card"><div class="card-head"><h3>Việc chậm tiến độ</h3><span class="pill c-late">${late.length}</span></div>
       <div class="list scroll-y">${late.length ? late.slice(0, 40).map(({ t, over }) => `
-        <div class="list-item" data-task="${t.id}" style="cursor:pointer"><div class="row"><span class="tag">${esc(taskLabel(t))}</span>${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : ''}${over ? `<span class="tag warn">Quá hạn ${over} ngày</span>` : '<span class="tag warn">Chưa triển khai</span>'}</div>
+        <div class="list-item" data-task="${t.id}" style="cursor:pointer"><div class="row"><span class="tag">${esc(taskLabel(t))}</span>${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : ''}${over ? `<span class="tag warn">Quá hạn ${fmtDur(over)}</span>` : '<span class="tag warn">Chưa triển khai</span>'}</div>
         <div class="t">${esc(t.name)}</div><small>KH ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)} · thực tế ${t.progress}%</small></div>`).join('') : '<div class="empty">Không có việc chậm 🎉</div>'}</div></div>
     <div class="card"><div class="card-head"><h3>Kế hoạch hôm nay & ngày mai</h3><span class="pill c-doing">${upcoming.length}</span></div>
       <div class="list scroll-y">${upcoming.length ? upcoming.map((t) => `
@@ -1337,6 +1346,7 @@ function renderDashboard() {
   <div class="card"><div class="card-head"><h3>Cập nhật hiện trường mới nhất</h3><button class="btn ghost sm" data-go="log">Xem nhật ký</button></div>
     <div class="list">${recent.length ? recent.map(updateItem).join('') : '<div class="empty">Chưa có cập nhật</div>'}</div></div>`;
 
+  $$('[data-smode]').forEach((b) => { b.onclick = () => { S.sHourly = b.dataset.smode === 'hour'; rerender(); }; });
   drawDashboardCharts(ts, now);
 }
 
@@ -1377,29 +1387,38 @@ function drawDashboardCharts(ts, now) {
   const planned = ts.filter((t) => t.plan_start);
   if (planned.length) {
     const starts = planned.map((t) => parseD(t.plan_start)), ends = planned.map(planEnd);
-    const d0 = dayStart(new Date(Math.min(...starts))), d1 = dayStart(new Date(Math.max(...ends, now)));
+    // Chế độ giờ: cửa sổ 3 ngày trước → 4 ngày sau hôm nay, mỗi điểm 1 giờ
+    const step = S.sHourly ? HOUR : DAY;
+    const d0 = S.sHourly ? new Date(dayStart(now).getTime() - 3 * DAY) : dayStart(new Date(Math.min(...starts)));
+    const d1 = S.sHourly ? new Date(dayStart(now).getTime() + 4 * DAY) : dayStart(new Date(Math.max(...ends, now)));
+    // Thời điểm hiệu lực của cập nhật: giờ gửi nếu báo cáo trong ngày, ngược lại cuối ngày báo cáo
     const hist = {};
-    S.updates.forEach((u) => { if (u.progress !== '' && u.progress != null) (hist[u.task_id] ||= []).push(u); });
-    Object.values(hist).forEach((a) => a.sort((x, y) => (x.report_date + x.ts < y.report_date + y.ts ? -1 : 1)));
-    const actualAt = (t, ds) => {
-      const h = (hist[t.id] || []).filter((u) => u.report_date <= ds);
+    S.updates.forEach((u) => {
+      if (u.progress === '' || u.progress == null) return;
+      const at = u.report_date && u.report_date !== String(u.ts).slice(0, 10) ? u.report_date + 'T23:59' : String(u.ts).slice(0, 16);
+      (hist[u.task_id] ||= []).push({ at, progress: u.progress });
+    });
+    Object.values(hist).forEach((a) => a.sort((x, y) => (x.at < y.at ? -1 : 1)));
+    const nowS = dtstr(now);
+    const actualAt = (t, cs) => {
+      const h = (hist[t.id] || []).filter((u) => u.at <= cs);
       if (h.length) return +h[h.length - 1].progress / 100;
-      if (t.actual_end && t.actual_end.slice(0, 10) <= ds) return 1;
-      if (t.actual_start && t.actual_start.slice(0, 10) <= ds) return ds >= today() ? t.progress / 100 : Math.min(t.progress, 50) / 100;
+      if (t.actual_end && t.actual_end.slice(0, 16) <= cs) return 1;
+      if (t.actual_start && t.actual_start.slice(0, 16) <= cs) return cs >= nowS ? t.progress / 100 : Math.min(t.progress, 50) / 100;
       return 0;
     };
     const labels = [], pl = [], ac = [];
-    for (let d = d0; d <= d1; d = new Date(d.getTime() + DAY)) {
-      const end = new Date(d.getTime() + DAY), ds = dstr(d);
-      labels.push(`${pad(d.getDate())}/${pad(d.getMonth() + 1)}`);
+    for (let d = d0; d <= d1; d = new Date(d.getTime() + step)) {
+      const end = new Date(d.getTime() + step), cs = dtstr(new Date(end.getTime() - 6e4));
+      labels.push(S.sHourly ? `${pad(end.getHours())}h ${pad(end.getDate())}/${pad(end.getMonth() + 1)}` : `${pad(d.getDate())}/${pad(d.getMonth() + 1)}`);
       pl.push(+weightedPct(planned, (t) => planFrac(t, end)).toFixed(1));
-      ac.push(ds <= today() ? +weightedPct(planned, (t) => actualAt(t, ds)).toFixed(1) : null);
+      ac.push(d <= now ? +weightedPct(planned, (t) => actualAt(t, end <= now ? cs : nowS)).toFixed(1) : null);
     }
     S.charts.s = new Chart($('#chS'), {
       type: 'line',
       data: { labels, datasets: [
         { label: 'Kế hoạch', data: pl, borderColor: cssVar('--todo'), backgroundColor: 'transparent', borderDash: [6, 4], tension: .25, pointRadius: 0, borderWidth: 2 },
-        { label: 'Thực tế', data: ac, borderColor: cssVar('--brand-2'), backgroundColor: cssVar('--brand-2') + '22', fill: true, tension: .25, pointRadius: 2, borderWidth: 2.5 },
+        { label: 'Thực tế', data: ac, borderColor: cssVar('--brand-2'), backgroundColor: cssVar('--brand-2') + '22', fill: true, tension: .25, pointRadius: S.sHourly ? 0 : 2, borderWidth: 2.5 },
       ] },
       options: { maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
         scales: { y: { min: 0, max: 100, ticks: { callback: (v) => v + '%' } }, x: { grid: { display: false } } },
@@ -1409,11 +1428,39 @@ function drawDashboardCharts(ts, now) {
 
   // Status donut
   const keys = Object.keys(CLS).filter((k) => ts.some((t) => klass(t, now) === k));
+  const nums = keys.map((k) => ts.filter((t) => klass(t, now) === k).length), total = nums.reduce((a, b) => a + b, 0);
+  const pctOf = (n) => (total ? (n / total) * 100 : 0);
+  const pctTxt = (n) => `${pctOf(n).toFixed(pctOf(n) < 10 ? 1 : 0)}%`;
+  // Ghi % lên từng lát (bỏ qua lát < 4% cho đỡ rối) và tổng số ở giữa
+  const pieLabels = {
+    id: 'pieLabels',
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart, meta = chart.getDatasetMeta(0);
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      meta.data.forEach((arc, i) => {
+        if (arc.hidden || pctOf(nums[i]) < 4) return;
+        const p = arc.tooltipPosition();
+        ctx.font = `700 12px ${Chart.defaults.font.family}`; ctx.fillStyle = '#fff';
+        ctx.fillText(pctTxt(nums[i]), p.x, p.y);
+      });
+      const a = meta.data[0];
+      if (a) {
+        ctx.fillStyle = cssVar('--ink'); ctx.font = `700 20px ${Chart.defaults.font.family}`;
+        ctx.fillText(total, a.x, a.y - 8);
+        ctx.fillStyle = cssVar('--muted'); ctx.font = `400 11px ${Chart.defaults.font.family}`;
+        ctx.fillText('công việc', a.x, a.y + 12);
+      }
+      ctx.restore();
+    },
+  };
   S.charts.status = new Chart($('#chStatus'), {
     type: 'doughnut',
-    data: { labels: keys.map((k) => CLS[k].label), datasets: [{ data: keys.map((k) => ts.filter((t) => klass(t, now) === k).length), backgroundColor: keys.map(col), borderColor: cssVar('--surface'), borderWidth: 2 }] },
-    options: { maintainAspectRatio: false, cutout: '62%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } },
+    data: { labels: keys.map((k, i) => `${CLS[k].label} (${pctTxt(nums[i])})`), datasets: [{ data: nums, backgroundColor: keys.map(col), borderColor: cssVar('--surface'), borderWidth: 2 }] },
+    options: { maintainAspectRatio: false, cutout: '55%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } },
+      tooltip: { callbacks: { label: (c) => ` ${CLS[keys[c.dataIndex]].label}: ${c.parsed} việc · ${pctTxt(c.parsed)}` } } },
       onClick: (_, el) => { if (el[0]) { S.filters.cls = keys[el[0].index]; go('field'); } } },
+    plugins: [pieLabels],
   });
 
   // Sections
@@ -1529,7 +1576,7 @@ function taskCard(t, now, lastUp) {
   return `<button type="button" class="task ${ed ? '' : 'locked'}" style="--k:var(${CLS[c].v})" data-task="${t.id}">
     <div class="top"><span class="tag">${esc(t.wbs)}</span>${t.phase ? `<span class="tag">Pha ${esc(t.phase)}</span>` : ''}${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : '<span class="tag">Chưa gán ĐV</span>'}${pill(c)}${+t.delay_days > 0 ? `<span class="tag warn">Chậm ${t.delay_days} ngày</span>` : ''}</div>
     <div class="name">${esc(t.name)}</div>
-    <div class="meta"><span>KH: ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)}</span><span>TT: ${fmtD(t.actual_start, false)}${t.actual_end ? ' → ' + fmtD(t.actual_end, false) : ''}</span></div>
+    <div class="meta"><span>KH: ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)}</span><span>TT: ${fmtD(t.actual_start)}${t.actual_end ? ' → ' + fmtD(t.actual_end) : ''}</span></div>
     <div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><i style="width:${t.progress}%;background:var(${CLS[c].v})"></i></div><b style="font-size:.85rem">${t.progress}%</b></div>
     ${last ? `<div class="last">${esc(fmtTs(last.ts))} – ${esc(last.user_name)}: ${esc(last.note || last.status || '')}</div>` : ''}
   </button>`;
@@ -1556,7 +1603,7 @@ function contentItem(t, now, lastUp) {
     <div class="ci-main">
       <div class="ci-name">${esc(t.name)}</div>
       <div class="ci-meta"><span class="tag">${esc(taskLabel(t))}</span>${t.unit ? `<span class="tag unit">${esc(t.unit)}</span>` : ''}${pill(c)}${+t.delay_days > 0 ? `<span class="tag warn">Chậm ${t.delay_days} ngày</span>` : ''}</div>
-      <div class="ci-dates">Kế hoạch ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)} · Thực tế ${fmtD(t.actual_start, false)}${t.actual_end ? ' → ' + fmtD(t.actual_end, false) : ''}</div>
+      <div class="ci-dates">Kế hoạch ${fmtD(t.plan_start)} → ${fmtD(t.plan_end)} · Thực tế ${fmtD(t.actual_start)}${t.actual_end ? ' → ' + fmtD(t.actual_end) : ''}</div>
       ${last ? `<div class="ci-note"><b>${esc(last.user_name || last.email)}</b> <small>${fmtTs(last.ts)}</small>${nPh ? ` <small>· ${nPh} ảnh</small>` : ''}<br>${esc(last.note || last.status || '')}</div>` : '<div class="ci-note muted">Chưa có cập nhật hiện trường</div>'}
     </div>
     <div class="ci-side"><b>${t.progress}%</b><div class="bar"><i style="width:${t.progress}%;background:var(${CLS[c].v})"></i></div><small>${mod ? 'Sửa ' + fmtTs(mod) : ''}</small></div>
@@ -1573,7 +1620,7 @@ function detailsTable(groups, now, lastUp, head) {
   const rows = [...groups].map(([key, list]) => `${S.fv.group ? `<tr class="grp"><td colspan="10">${head(key, list.length)}</td></tr>` : ''}
     ${sortTasks(list, lastUp).map((t) => { const c = klass(t, now), mod = modifiedOf(t, lastUp); return `<tr data-task="${t.id}" tabindex="0" class="${canEdit(t) ? '' : 'locked'}">
       <td><span class="pill c-${c}">${CLS[c].label}</span></td><td>${esc(t.wbs)}</td><td>${esc(t.phase)}</td><td class="d-name">${esc(t.name)}</td><td>${esc(t.unit || '—')}</td>
-      <td>${fmtD(t.plan_start)}</td><td>${fmtD(t.plan_end)}</td><td>${fmtD(t.actual_start, false)}</td><td class="num"><b>${t.progress}%</b></td><td>${mod ? fmtTs(mod) : '—'}</td></tr>`; }).join('')}`).join('');
+      <td>${fmtD(t.plan_start)}</td><td>${fmtD(t.plan_end)}</td><td>${fmtD(t.actual_start)}</td><td class="num"><b>${t.progress}%</b></td><td>${mod ? fmtTs(mod) : '—'}</td></tr>`; }).join('')}`).join('');
   return `<div class="table-wrap fv-details"><table><thead><tr>${th('Tình trạng')}${th('WBS', 'wbs')}${th('Pha')}${th('Đầu việc', 'name')}${th('Nhà thầu')}${th('Bắt đầu KH')}${th('Kết thúc KH')}${th('Bắt đầu TT')}${th('%')}${th('Ngày sửa đổi', 'modified')}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -1754,10 +1801,15 @@ function renderGantt() {
   const nDays = Math.round((d1 - d0) / DAY), PX = S.ganttPx, W = nDays * PX;
   const x = (d) => ((d - d0) / DAY) * PX;
   const todayX = x(now);
+  // Zoom theo giờ (≥ 240px/ngày): hàng trên ghi ngày, hàng dưới ghi giờ
+  const hourly = PX >= 240, hStep = PX >= 480 ? 1 : 3, HPX = PX / 24;
   let days = '';
   for (let i = 0; i < nDays; i++) {
-    const d = new Date(d0.getTime() + i * DAY), we = d.getDay() === 0 || d.getDay() === 6;
-    days += `<div class="g-day ${we ? 'we' : ''} ${dstr(d) === today() ? 'td' : ''}" style="left:${i * PX}px;width:${PX}px">${d.getDate()}<br><span style="font-weight:400">${'CN,T2,T3,T4,T5,T6,T7'.split(',')[d.getDay()]}</span></div>`;
+    const d = new Date(d0.getTime() + i * DAY), we = d.getDay() === 0 || d.getDay() === 6, wd = 'CN,T2,T3,T4,T5,T6,T7'.split(',')[d.getDay()];
+    days += hourly
+      ? `<div class="g-day hd ${we ? 'we' : ''} ${dstr(d) === today() ? 'td' : ''}" style="left:${i * PX}px;width:${PX}px">${wd} ${pad(d.getDate())}/${pad(d.getMonth() + 1)}</div>`
+        + Array.from({ length: 24 / hStep }, (_, j) => `<div class="g-hour" style="left:${i * PX + j * hStep * HPX}px;width:${hStep * HPX}px">${pad(j * hStep)}h</div>`).join('')
+      : `<div class="g-day ${we ? 'we' : ''} ${dstr(d) === today() ? 'td' : ''}" style="left:${i * PX}px;width:${PX}px">${d.getDate()}<br><span style="font-weight:400">${wd}</span></div>`;
   }
   let rows = '', sec = null;
   ts.forEach((t) => {
@@ -1777,10 +1829,10 @@ function renderGantt() {
   $('#main').innerHTML = `
     <div class="toolbar"><h2>Biểu đồ tiến độ (Gantt)</h2>
       <label class="legend"><input type="checkbox" id="hideUnpl" ${S.ganttHideUnplanned ? 'checked' : ''}> Ẩn việc chưa có kế hoạch</label>
-      <div class="quick" style="flex:none;flex-wrap:nowrap"><button type="button" data-zoom="22" class="${PX === 22 ? 'on' : ''}">−</button><button type="button" data-zoom="34" class="${PX === 34 ? 'on' : ''}">○</button><button type="button" data-zoom="60" class="${PX === 60 ? 'on' : ''}">＋</button></div></div>
+      <div class="quick" style="flex:none;flex-wrap:nowrap"><button type="button" data-zoom="22" class="${PX === 22 ? 'on' : ''}">−</button><button type="button" data-zoom="34" class="${PX === 34 ? 'on' : ''}">○</button><button type="button" data-zoom="60" class="${PX === 60 ? 'on' : ''}">＋</button><button type="button" data-zoom="288" class="${PX === 288 ? 'on' : ''}" title="Chi tiết theo giờ (mỗi vạch 3 giờ)">Giờ</button><button type="button" data-zoom="576" class="${PX === 576 ? 'on' : ''}" title="Chi tiết từng giờ">Giờ+</button></div></div>
     ${filterBar()}
     <div class="legend" style="margin-bottom:10px"><span><i style="background:var(--plan)"></i>Kế hoạch</span>${['done', 'doing', 'late', 'paused'].map((k) => `<span><i style="background:var(${CLS[k].v})"></i>Thực tế – ${CLS[k].label}</span>`).join('')}<span><i style="background:var(--late);width:2px;height:14px"></i>Hôm nay</span></div>
-    <div class="gantt-wrap" id="gwrap"><div class="gantt" style="--px:${PX}px">
+    <div class="gantt-wrap" id="gwrap"><div class="gantt ${hourly ? 'hourly' : ''}" style="--px:${PX}px;--hpx:${hStep * HPX}px">
       <div class="g-row g-head"><div class="g-left">Công việc (${ts.length})</div><div class="g-track" style="width:${W}px;height:38px">${days}</div></div>
       ${rows || '<div class="empty">Không có công việc</div>'}
     </div></div>`;

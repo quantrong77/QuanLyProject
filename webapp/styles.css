@@ -291,6 +291,10 @@ dialog::backdrop { background: rgba(10, 18, 36, .55); }
 .g-day { position: absolute; top: 0; bottom: 0; display: grid; place-items: center; font-size: .7rem; color: var(--muted); line-height: 1.1; text-align: center; }
 .g-day.we { background: color-mix(in srgb, var(--todo) 10%, transparent); }
 .g-day.td { color: var(--late); font-weight: 700; }
+/* zoom theo giờ: vạch ngày đậm, vạch giờ mờ; nhãn ngày ở nửa trên, nhãn giờ ở nửa dưới */
+.gantt.hourly .g-track { background-image: linear-gradient(to right, var(--muted) 1px, transparent 1px), linear-gradient(to right, color-mix(in srgb, var(--line) 60%, transparent) 1px, transparent 1px); background-size: var(--px) 100%, var(--hpx) 100%; }
+.g-day.hd { bottom: 50%; border-left: 1px solid var(--muted); place-items: center start; padding-left: 6px; }
+.g-hour { position: absolute; top: 50%; bottom: 0; display: grid; place-items: center start; padding-left: 2px; font-size: .64rem; font-weight: 400; color: var(--muted); }
 .g-sec .g-left, .g-sec { background: var(--surface-2); font-weight: 700; color: var(--brand-2); }
 .gb { position: absolute; height: 10px; border-radius: 4px; }
 .gb.plan { top: 6px; background: var(--plan); }
